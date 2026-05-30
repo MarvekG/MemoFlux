@@ -19,8 +19,14 @@ class FakeLLMClient:
 
     def synthesize_answer(self, *, query: str, memories: list) -> LLMResult:
         self.calls.append(("synthesize_answer", query, len(memories)))
+        memory_ids = [memory.memory_id for memory in memories]
         return LLMResult(
-            output={"answer": "LLM 整合答案：" + "；".join(memory.content for memory in memories), "confidence": 0.8},
+            output={
+                "answer": "LLM 整合答案：" + "；".join(memory.content for memory in memories),
+                "confidence": 0.8,
+                "used_memory_ids": memory_ids,
+                "uncertainties": [],
+            },
             input_tokens=20,
             output_tokens=10,
             model="fake",
@@ -35,7 +41,7 @@ class StringConfidenceLLMClient(FakeLLMClient):
     def synthesize_answer(self, *, query: str, memories: list) -> LLMResult:
         self.calls.append(("synthesize_answer", query, len(memories)))
         return LLMResult(
-            output={"answer": "字符串置信度答案", "confidence": "high"},
+            output={"answer": "字符串置信度答案", "confidence": "high", "used_memory_ids": [memory.memory_id for memory in memories]},
             input_tokens=20,
             output_tokens=10,
             model="fake",

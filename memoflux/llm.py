@@ -5,6 +5,10 @@ import urllib.request
 from dataclasses import dataclass
 from typing import Any
 
+from pydantic import ValidationError
+
+from memoflux.llm_schemas import AnswerSynthesisInput, AnswerSynthesisOutput, QueryPlanInput, QueryPlanOutput
+
 
 @dataclass(frozen=True)
 class LLMResult:
@@ -22,13 +26,20 @@ class LocalLLMClient:
     def plan_query(self, *, query: str) -> LLMResult:
         """生成本地 query plan。"""
 
-        return LLMResult(output={"query_type": "direct", "rewritten_queries": [query]}, input_tokens=_estimate_tokens(query), output_tokens=4, model="local")
+        output = QueryPlanOutput(query_type="direct", rewritten_queries=[query])
+        return LLMResult(output=output.model_dump(), input_tokens=_estimate_tokens(query), output_tokens=4, model="local")
 
     def synthesize_answer(self, *, query: str, memories: list) -> LLMResult:
         """基于候选记忆生成本地答案。"""
 
         answer = "\n".join(memory.content for memory in memories)
-        return LLMResult(output={"answer": answer, "confidence": 0.6}, input_tokens=_estimate_tokens(query), output_tokens=_estimate_tokens(answer), model="local")
+        output = AnswerSynthesisOutput(
+            answer=answer,
+            confidence=0.6,
+            used_memory_ids=[memory.memory_id for memory in memories],
+            uncertainties=[],
+        )
+        return LLMResult(output=output.model_dump(), input_tokens=_estimate_tokens(query), output_tokens=_estimate_tokens(answer), model="local")
 
     def run_prompt(self, *, prompt_key: str, payload: dict) -> LLMResult:
         """返回本地 prompt 调试结果。"""
@@ -48,25 +59,48 @@ class OpenAICompatibleLLMClient:
     def plan_query(self, *, query: str) -> LLMResult:
         """调用真实 LLM 生成 query plan。"""
 
+        prompt_input = QueryPlanInput(query=query)
         messages = [
-            {"role": "system", "content": "你是 MemoFlux 查询规划器。输出 JSON：query_type 和 rewritten_queries。"},
-            {"role": "user", "content": query},
+            {"role": "system", "content": "你是 MemoFlux 查询规划器。只输出 JSON：query_type 和 rewritten_queries。"},
+            {"role": "user", "content": prompt_input.model_dump_json()},
         ]
         result = self._chat(messages)
-        output = _parse_json_object(result.output.get("content", ""), fallback={"query_type": "direct", "rewritten_queries": [query]})
-        return LLMResult(output=output, input_tokens=result.input_tokens, output_tokens=result.output_tokens, model=result.model)
+        raw_output = _parse_json_object(result.output.get("content", ""), fallback={"query_type": "direct", "rewritten_queries": [query]})
+        output = QueryPlanOutput.model_validate(raw_output)
+        if not output.rewritten_queries:
+            output = QueryPlanOutput(query_type=output.query_type, rewritten_queries=[query])
+        return LLMResult(output=output.model_dump(), input_tokens=result.input_tokens, output_tokens=result.output_tokens, model=result.model)
 
     def synthesize_answer(self, *, query: str, memories: list) -> LLMResult:
         """调用真实 LLM 基于候选记忆整合答案。"""
 
         memory_text = "\n".join(f"[{index + 1}] {memory.content}" for index, memory in enumerate(memories))
+        prompt_input = AnswerSynthesisInput(
+            query=query,
+            memories=[
+                {"memory_id": memory.memory_id, "content": memory.content, "occurred_at": memory.occurred_at}
+                for memory in memories
+            ],
+        )
         messages = [
-            {"role": "system", "content": "你是 MemoFlux 答案整合器。只能基于给定记忆回答，输出 JSON：answer、confidence。"},
-            {"role": "user", "content": f"问题：{query}\n候选记忆：\n{memory_text}"},
+            {
+                "role": "system",
+                "content": "你是 MemoFlux 答案整合器。只能基于给定记忆回答。只输出 JSON：answer、confidence、used_memory_ids、uncertainties。confidence 必须是 0 到 1 的数字，used_memory_ids 必须来自候选 memory_id。",
+            },
+            {"role": "user", "content": prompt_input.model_dump_json()},
         ]
         result = self._chat(messages)
-        output = _parse_json_object(result.output.get("content", ""), fallback={"answer": memory_text, "confidence": 0.4})
-        return LLMResult(output=output, input_tokens=result.input_tokens, output_tokens=result.output_tokens, model=result.model)
+        raw_output = _parse_json_object(result.output.get("content", ""), fallback={"answer": memory_text, "confidence": 0.4, "used_memory_ids": [memory.memory_id for memory in memories], "uncertainties": []})
+        try:
+            output = AnswerSynthesisOutput.model_validate(raw_output)
+        except ValidationError:
+            output = AnswerSynthesisOutput(
+                answer=str(raw_output.get("answer") or memory_text),
+                confidence=0.6,
+                used_memory_ids=[],
+                uncertainties=["invalid_llm_output"],
+            )
+        return LLMResult(output=output.model_dump(), input_tokens=result.input_tokens, output_tokens=result.output_tokens, model=result.model)
 
     def run_prompt(self, *, prompt_key: str, payload: dict) -> LLMResult:
         """调用真实 LLM 执行 prompt 调试。"""
