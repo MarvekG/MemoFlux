@@ -232,6 +232,38 @@ def test_ingest_and_recall_use_embeddings_for_vector_retrieval():
     assert [call[0] for call in llm_client.calls] == ["plan_query", "synthesize_answer"]
 
 
+def test_audits_return_persisted_recall_records():
+    llm_client = FakeLLMClient()
+    app = create_app(repository=MemoryRepository(), llm_client=llm_client, embedding_client=FakeEmbeddingService())
+    from fastapi.testclient import TestClient
+
+    client = TestClient(app)
+    client.post(
+        "/v1/ingest",
+        json={
+            "scope": "project:atlas",
+            "content": "Atlas 发布延期，因为数据库迁移回滚方案不完整。",
+            "occurred_at": "2026-05-01T10:00:00Z",
+        },
+    )
+    recall_response = client.post("/v1/recall", json={"scope": "project:atlas", "query": "Atlas 为什么延期？"})
+    query_id = recall_response.json()["data"]["query_id"]
+
+    audits_response = client.get("/v1/audits", params={"scope": "project:atlas"})
+
+    assert audits_response.status_code == 200
+    items = audits_response.json()["data"]["items"]
+    assert len(items) == 1
+    assert items[0]["audit_type"] == "query"
+    assert items[0]["query_id"] == query_id
+    assert items[0]["scope"] == "project:atlas"
+    assert items[0]["original_query"] == "Atlas 为什么延期？"
+    assert items[0]["query_type"] == "direct"
+    assert items[0]["selected_memory_ids"]
+    assert items[0]["final_answer"].startswith("LLM 整合答案")
+    assert "llm_usage" not in items[0]
+
+
 def test_settings_use_memoflux_embedding_configuration(monkeypatch):
     monkeypatch.setenv("MEMOFLUX_EMBEDDING_PROVIDER", "openai_compatible")
     monkeypatch.setenv("MEMOFLUX_EMBEDDING_MODEL", "text-embedding-3-small")

@@ -10,7 +10,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from memoflux.config import load_settings
 from memoflux.llm import LocalLLMClient, OpenAICompatibleLLMClient
-from memoflux.models import MemoryRecord, RecallReference
+from memoflux.models import DeleteAuditRecord, MemoryRecord, QueryAuditRecord, RecallReference
 from memoflux.service import MemoFluxService
 from memoflux.storage.postgres import PostgresMemoryRepository
 
@@ -111,8 +111,9 @@ def create_app(*, repository=None, llm_client=None, embedding_client=None, datab
         return _ok({"items": [_memory_payload(item, include_content=True) for item in service.preview(scope=scope, limit=limit)], "next_cursor": None})
 
     @app.get("/v1/audits")
-    def audits(scope: str, limit: int = 50):
-        return _ok({"items": [], "next_cursor": None})
+    def audits(scope: str, query_id: str | None = None, limit: int = 50):
+        items = service.repository.list_audits(scope=scope, query_id=query_id, limit=limit)
+        return _ok({"items": [_audit_payload(item) for item in items], "next_cursor": None})
 
     @app.get("/v1/usage/stats")
     def usage_stats():
@@ -174,4 +175,39 @@ def _reference_payload(reference: RecallReference) -> dict[str, Any]:
         "occurred_at": reference.occurred_at.isoformat(),
         "quote": reference.quote,
         "relevance": reference.relevance,
+    }
+
+
+def _audit_payload(audit: QueryAuditRecord | DeleteAuditRecord) -> dict[str, Any]:
+    """序列化审计记录，避免返回单次 token 消耗。"""
+
+    if isinstance(audit, QueryAuditRecord):
+        return {
+            "audit_type": "query",
+            "query_id": audit.query_id,
+            "scope": audit.scope,
+            "original_query": audit.original_query,
+            "query_type": audit.query_type,
+            "rewritten_queries": audit.rewritten_queries,
+            "candidate_limit": audit.candidate_limit,
+            "retrieved": audit.retrieved,
+            "selected_memory_ids": audit.selected_memory_ids,
+            "final_answer": audit.final_answer,
+            "status": audit.status,
+            "error_stage": audit.error_stage,
+            "error_message": audit.error_message,
+            "created_at": audit.created_at.isoformat(),
+        }
+    return {
+        "audit_type": "delete",
+        "delete_id": audit.delete_id,
+        "scope": audit.scope,
+        "target": audit.target,
+        "dry_run": audit.dry_run,
+        "matched_memory_ids": audit.matched_memory_ids,
+        "affected_memory_ids": audit.affected_memory_ids,
+        "status": audit.status,
+        "error_code": audit.error_code,
+        "error_message": audit.error_message,
+        "created_at": audit.created_at.isoformat(),
     }

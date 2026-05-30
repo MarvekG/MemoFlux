@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from uuid import uuid4
 
-from memoflux.models import MemoryRecord, UsageStats
+from memoflux.models import DeleteAuditRecord, MemoryRecord, QueryAuditRecord, UsageStats
 from memoflux.retrieval import score_content
 
 
@@ -13,6 +13,8 @@ class MemoryRepository:
     def __init__(self) -> None:
         self._memories: dict[str, MemoryRecord] = {}
         self._usage: list[tuple[str, int, int]] = []
+        self._query_audits: dict[str, QueryAuditRecord] = {}
+        self._delete_audits: dict[str, DeleteAuditRecord] = {}
 
     def insert_memory(self, *, scope: str, content: str, occurred_at: datetime, embedding=None) -> MemoryRecord:
         """写入一条记忆。"""
@@ -93,3 +95,62 @@ class MemoryRepository:
         deleted = len(self._usage)
         self._usage.clear()
         return deleted
+
+    def record_query_audit(self, audit: QueryAuditRecord) -> None:
+        """记录召回查询审计。"""
+
+        self._query_audits[audit.query_id] = audit
+
+    def record_delete_audit(self, audit: DeleteAuditRecord) -> None:
+        """记录删除操作审计。"""
+
+        self._delete_audits[audit.delete_id] = audit
+
+    def list_audits(
+        self,
+        *,
+        scope: str,
+        limit: int,
+        query_id: str | None = None,
+    ) -> list[QueryAuditRecord | DeleteAuditRecord]:
+        """列出同一 scope 内的查询和删除审计。"""
+
+        if query_id:
+            audit = self._query_audits.get(query_id)
+            return [audit] if audit and audit.scope == scope else []
+        audits: list[QueryAuditRecord | DeleteAuditRecord] = [
+            audit for audit in self._query_audits.values() if audit.scope == scope
+        ]
+        audits.extend(audit for audit in self._delete_audits.values() if audit.scope == scope)
+        audits.sort(key=lambda audit: audit.created_at, reverse=True)
+        return audits[:limit]
+
+    def scrub_deleted_memory_from_audits(self, *, scope: str, memory_ids: list[str]) -> None:
+        """从审计记录中清理已硬删除记忆的原文片段。"""
+
+        deleted = set(memory_ids)
+        for query_id, audit in list(self._query_audits.items()):
+            if audit.scope != scope:
+                continue
+            retrieved = [
+                {**item, "content_preview": None}
+                if item.get("memory_id") in deleted
+                else item
+                for item in audit.retrieved
+            ]
+            final_answer = None if any(memory_id in audit.selected_memory_ids for memory_id in deleted) else audit.final_answer
+            self._query_audits[query_id] = QueryAuditRecord(
+                query_id=audit.query_id,
+                scope=audit.scope,
+                original_query=audit.original_query,
+                query_type=audit.query_type,
+                rewritten_queries=audit.rewritten_queries,
+                candidate_limit=audit.candidate_limit,
+                retrieved=retrieved,
+                selected_memory_ids=audit.selected_memory_ids,
+                final_answer=final_answer,
+                status=audit.status,
+                error_stage=audit.error_stage,
+                error_message=audit.error_message,
+                created_at=audit.created_at,
+            )

@@ -1,10 +1,10 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import UTC, datetime
 from uuid import uuid4
 
 from memoflux.llm import LLMResult, LocalLLMClient
-from memoflux.models import DeleteResult, RecallReference, RecallResult
+from memoflux.models import DeleteAuditRecord, DeleteResult, QueryAuditRecord, RecallReference, RecallResult
 from memoflux.retrieval import build_terms, is_history_query
 from memoflux.services.embedding_service import embedding_service
 
@@ -48,6 +48,7 @@ class MemoFluxService:
             raise ValueError("scope is required")
         if not query:
             raise ValueError("query is required")
+        query_id = uuid4().hex
         plan = self.llm_client.plan_query(query=query)
         rewritten_queries = plan.output.get("rewritten_queries") or [query]
         terms = set()
@@ -69,7 +70,25 @@ class MemoFluxService:
             memories.sort(key=lambda memory: memory.occurred_at)
         self.repository.record_usage(operation="query_planner", input_tokens=plan.input_tokens, output_tokens=plan.output_tokens)
         if not memories:
-            return RecallResult(query_id=uuid4().hex, query_type="direct", answer=NO_ANSWER, references=[])
+            result = RecallResult(query_id=query_id, query_type="direct", answer=NO_ANSWER, references=[])
+            self.repository.record_query_audit(
+                QueryAuditRecord(
+                    query_id=query_id,
+                    scope=scope,
+                    original_query=query,
+                    query_type="direct",
+                    rewritten_queries=[str(item) for item in rewritten_queries],
+                    candidate_limit=top_k,
+                    retrieved=[],
+                    selected_memory_ids=[],
+                    final_answer=result.answer,
+                    status="ok",
+                    error_stage=None,
+                    error_message=None,
+                    created_at=_now_utc(),
+                )
+            )
+            return result
         synthesis = self.llm_client.synthesize_answer(query=query, memories=memories)
         self.repository.record_usage(
             operation="answer_synthesizer",
@@ -85,14 +104,32 @@ class MemoFluxService:
             )
             for memory in memories
         ]
-        return RecallResult(
-            query_id=uuid4().hex,
+        result = RecallResult(
+            query_id=query_id,
             query_type=str(plan.output.get("query_type") or ("history" if is_history_query(query) else "direct")),
             answer=str(synthesis.output.get("answer") or "\n".join(memory.content for memory in memories)),
             references=references,
             confidence=float(synthesis.output.get("confidence") or 0.6),
             uncertainties=[],
         )
+        self.repository.record_query_audit(
+            QueryAuditRecord(
+                query_id=query_id,
+                scope=scope,
+                original_query=query,
+                query_type=result.query_type,
+                rewritten_queries=[str(item) for item in rewritten_queries],
+                candidate_limit=top_k,
+                retrieved=[_audit_memory_item(memory) for memory in memories],
+                selected_memory_ids=[memory.memory_id for memory in memories],
+                final_answer=result.answer,
+                status="ok",
+                error_stage=None,
+                error_message=None,
+                created_at=_now_utc(),
+            )
+        )
+        return result
 
     def delete(self, *, scope: str, memory_ids: list[str] | None, query: str | None, dry_run: bool) -> DeleteResult:
         """删除记忆；query 模式只允许 dry-run。"""
@@ -125,6 +162,22 @@ class MemoFluxService:
         """清空聚合用量统计。"""
 
         return self.repository.clear_usage_stats()
+
+
+def _audit_memory_item(memory) -> dict:
+    """构造不超过 120 字的审计候选摘要。"""
+
+    return {
+        "memory_id": memory.memory_id,
+        "occurred_at": memory.occurred_at.isoformat(),
+        "content_preview": memory.content[:120],
+    }
+
+
+def _now_utc() -> datetime:
+    """返回当前 UTC 时间。"""
+
+    return datetime.now(tz=UTC)
 
 
 def _estimate_tokens(text: str) -> int:
