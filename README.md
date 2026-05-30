@@ -75,6 +75,8 @@ GET    /v1/usage/stats
 DELETE /v1/usage/stats
 ```
 
+Recall uses the original query plus LLM rewritten queries for vector retrieval, merges candidates by `memory_id`, and returns references only for `used_memory_ids` selected by the Answer Synthesizer. If the candidate memories do not support the question, the answer is `当前 session 中没有足够记忆支持回答该问题。` and references are empty.
+
 ## Run Tests
 
 ```bash

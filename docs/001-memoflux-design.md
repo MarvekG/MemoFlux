@@ -242,7 +242,7 @@ Planner 可以为一次用户 query 生成多个 rewritten query。这样可以�
 
 ### 7.2 第二层：Candidate Retriever
 
-MemoFlux 对每个 rewritten query 执行同一 `session` 内的候选检索。
+MemoFlux 对原始 query 和 Query Planner 生成的 rewritten queries 执行同一 `session` 内的候选检索。服务层会先将原始 query 放在第一位，再追加 rewritten queries，并过滤空字符串和重复字符串。
 
 必需过滤条件：
 
@@ -250,7 +250,7 @@ MemoFlux 对每个 rewritten query 执行同一 `session` 内的候选检索。
 session == request.session
 ```
 
-第一版候选检索优先使用 pgvector 最近邻召回，并保留 PostgreSQL 文本匹配、可选全文检索、时间窗口过滤和 `occurred_at` 排序作为兜底与诊断能力。Retriever 合并所有 rewritten query 的候选，按 `memory_id` 去重，再从 `memories` 回填完整 memory，最后把候选集合交给答案整合层。
+第一版候选检索优先使用 pgvector 最近邻召回，并保留 PostgreSQL 文本匹配、可选全文检索、时间窗口过滤和 `occurred_at` 排序作为兜底与诊断能力。Retriever 合并所有检索 query 的候选，按 `memory_id` 去重并保留首次出现顺序，再从 `memories` 回填完整 memory，最后把候选集合交给答案整合层。`top_k` 表示合并去重后的最终候选上限。
 
 排序规则：
 
@@ -272,24 +272,24 @@ query planner 输出
 引用证据输出要求
 ```
 
+Synthesizer 同时负责候选判别和答案生成。它必须判断候选是否真正回答问题、是否与问题主体一致；如果候选证据不足，不允许猜测，必须返回固定拒答文案：`当前 session 中没有足够记忆支持回答该问题。`
+
 输出结构化结果：
 
 ```json
 {
   "answer": "...",
-  "query_type": "direct|related|history|causal",
-  "references": [
-    {
-      "memory_id": "...",
-      "occurred_at": "...",
-      "quote": "...",
-      "relevance": "..."
-    }
-  ],
+  "confidence": 0.0,
+  "used_memory_ids": ["..."],
+  "relevance_by_id": {
+    "memory_id": "该记忆为什么支持答案"
+  },
   "confidence": 0.0,
   "uncertainties": ["..."]
 }
 ```
+
+API `references` 只返回 `used_memory_ids` 对应的记忆。`references[].relevance` 来自 `relevance_by_id`；如果缺失，服务层使用保守 fallback 文案。query audit 会保存完整 `retrieved` 候选、`selected_memory_ids` 和 `selection_reasons`。
 
 默认返回引用证据。调用方可以设置 `include_references=false`，让 API 响应体不返回引用；但 MemoFlux 仍应在审计记录中保存引用和候选信息，便于排障。
 
