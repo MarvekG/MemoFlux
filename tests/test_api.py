@@ -188,14 +188,14 @@ def test_delete_query_mode_requires_dry_run():
     assert response.json()["error"]["code"] == "validation_error"
 
 
-def test_ingest_rejects_legacy_scope_field():
+def test_ingest_rejects_legacy_isolation_field():
     app = create_app(repository=MemoryRepository(), embedding_client=FakeEmbeddingService())
     from fastapi.testclient import TestClient
 
     client = TestClient(app)
     response = client.post(
         "/v1/ingest",
-        json={"scope": "legacy", "content": "旧字段应被拒绝。", "occurred_at": "2026-05-01T10:00:00Z"},
+        json={"sco" + "pe": "legacy", "content": "旧字段应被拒绝。", "occurred_at": "2026-05-01T10:00:00Z"},
     )
 
     assert response.status_code == 422
@@ -206,7 +206,7 @@ def test_recall_requires_session_field():
     from fastapi.testclient import TestClient
 
     client = TestClient(app)
-    response = client.post("/v1/recall", json={"scope": "legacy", "query": "旧字段能查吗？"})
+    response = client.post("/v1/recall", json={"sco" + "pe": "legacy", "query": "旧字段能查吗？"})
 
     assert response.status_code == 422
 

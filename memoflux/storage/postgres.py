@@ -23,12 +23,12 @@ class MemoryRow(Base):
 
     __tablename__ = "memories"
     __table_args__ = (
-        Index("ix_memoflux_memories_scope_occurred_at", "scope", "occurred_at"),
-        Index("ix_memoflux_memories_scope_created_at", "scope", "created_at"),
+        Index("ix_memoflux_memories_session_occurred_at", "session", "occurred_at"),
+        Index("ix_memoflux_memories_session_created_at", "session", "created_at"),
     )
 
     memory_id: Mapped[str] = mapped_column(String, primary_key=True)
-    scope: Mapped[str] = mapped_column(String, nullable=False)
+    session: Mapped[str] = mapped_column(String, nullable=False)
     content: Mapped[str] = mapped_column(Text, nullable=False)
     embedding: Mapped[list[float] | None] = mapped_column(Vector(768), nullable=True)
     occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
@@ -53,10 +53,10 @@ class QueryAuditRow(Base):
     """召回查询审计 ORM 映射。"""
 
     __tablename__ = "memory_query_audits"
-    __table_args__ = (Index("ix_memoflux_query_audits_scope_created_at", "scope", "created_at"),)
+    __table_args__ = (Index("ix_memoflux_query_audits_session_created_at", "session", "created_at"),)
 
     query_id: Mapped[str] = mapped_column(String, primary_key=True)
-    scope: Mapped[str] = mapped_column(String, nullable=False)
+    session: Mapped[str] = mapped_column(String, nullable=False)
     original_query: Mapped[str] = mapped_column(Text, nullable=False)
     query_type: Mapped[str] = mapped_column(String, nullable=False)
     rewritten_queries: Mapped[list] = mapped_column(JSON, nullable=False)
@@ -74,10 +74,10 @@ class DeleteAuditRow(Base):
     """删除操作审计 ORM 映射。"""
 
     __tablename__ = "memory_delete_audits"
-    __table_args__ = (Index("ix_memoflux_delete_audits_scope_created_at", "scope", "created_at"),)
+    __table_args__ = (Index("ix_memoflux_delete_audits_session_created_at", "session", "created_at"),)
 
     delete_id: Mapped[str] = mapped_column(String, primary_key=True)
-    scope: Mapped[str] = mapped_column(String, nullable=False)
+    session: Mapped[str] = mapped_column(String, nullable=False)
     target: Mapped[dict] = mapped_column(JSON, nullable=False)
     dry_run: Mapped[int] = mapped_column(Integer, nullable=False)
     matched_memory_ids: Mapped[list] = mapped_column(JSON, nullable=False)
@@ -109,12 +109,12 @@ class PostgresMemoryRepository:
             conn.execute(CreateSchema(self.schema, if_not_exists=True))
         Base.metadata.create_all(bind=self.engine)
 
-    def insert_memory(self, *, scope: str, content: str, occurred_at: datetime, embedding=None) -> MemoryRecord:
+    def insert_memory(self, *, session: str, content: str, occurred_at: datetime, embedding=None) -> MemoryRecord:
         """写入一条记忆。"""
 
         row = MemoryRow(
             memory_id=uuid4().hex,
-            scope=scope,
+            session=session,
             content=content,
             embedding=embedding,
             occurred_at=occurred_at,
@@ -125,10 +125,10 @@ class PostgresMemoryRepository:
             session.commit()
         return _memory_from_row(row)
 
-    def search_memories(self, *, scope: str, terms: set[str], limit: int, query_embedding=None) -> list[MemoryRecord]:
-        """按 scope 和文本词召回候选。"""
+    def search_memories(self, *, session: str, terms: set[str], limit: int, query_embedding=None) -> list[MemoryRecord]:
+        """按 session 召回候选。"""
 
-        statement = select(MemoryRow).where(MemoryRow.scope == scope)
+        statement = select(MemoryRow).where(MemoryRow.session == session)
         if query_embedding:
             statement = statement.order_by(MemoryRow.embedding.l2_distance(query_embedding).asc())
         elif terms:
@@ -141,23 +141,23 @@ class PostgresMemoryRepository:
             rows = session.scalars(statement).all()
         return [_memory_from_row(row) for row in rows]
 
-    def delete_memories(self, *, scope: str, memory_ids: list[str]) -> list[str]:
-        """硬删除同一 scope 内的记忆。"""
+    def delete_memories(self, *, session: str, memory_ids: list[str]) -> list[str]:
+        """硬删除同一 session 内的记忆。"""
 
         if not memory_ids:
             return []
-        select_statement = select(MemoryRow.memory_id).where(MemoryRow.scope == scope, MemoryRow.memory_id.in_(memory_ids))
-        delete_statement = delete(MemoryRow).where(MemoryRow.scope == scope, MemoryRow.memory_id.in_(memory_ids))
+        select_statement = select(MemoryRow.memory_id).where(MemoryRow.session == session, MemoryRow.memory_id.in_(memory_ids))
+        delete_statement = delete(MemoryRow).where(MemoryRow.session == session, MemoryRow.memory_id.in_(memory_ids))
         with Session(self.engine) as session:
             matched = list(session.scalars(select_statement).all())
             session.execute(delete_statement)
             session.commit()
         return matched
 
-    def list_memories(self, *, scope: str, limit: int) -> list[MemoryRecord]:
-        """列出同一 scope 内的原始记忆。"""
+    def list_memories(self, *, session: str, limit: int) -> list[MemoryRecord]:
+        """列出同一 session 内的原始记忆。"""
 
-        statement = select(MemoryRow).where(MemoryRow.scope == scope).order_by(MemoryRow.occurred_at.asc()).limit(limit)
+        statement = select(MemoryRow).where(MemoryRow.session == session).order_by(MemoryRow.occurred_at.asc()).limit(limit)
         with Session(self.engine) as session:
             rows = session.scalars(statement).all()
         return [_memory_from_row(row) for row in rows]
@@ -241,28 +241,28 @@ class PostgresMemoryRepository:
     def list_audits(
         self,
         *,
-        scope: str,
+        session: str,
         limit: int,
         query_id: str | None = None,
     ) -> list[QueryAuditRecord | DeleteAuditRecord]:
-        """列出同一 scope 内的查询和删除审计。"""
+        """列出同一 session 内的查询和删除审计。"""
 
-        with Session(self.engine) as session:
+        with Session(self.engine) as db_session:
             if query_id:
-                row = session.get(QueryAuditRow, query_id)
-                return [_query_audit_from_row(row)] if row and row.scope == scope else []
+                row = db_session.get(QueryAuditRow, query_id)
+                return [_query_audit_from_row(row)] if row and row.session == session else []
             query_rows = list(
-                session.scalars(
+                db_session.scalars(
                     select(QueryAuditRow)
-                    .where(QueryAuditRow.scope == scope)
+                    .where(QueryAuditRow.session == session)
                     .order_by(QueryAuditRow.created_at.desc())
                     .limit(limit)
                 ).all()
             )
             delete_rows = list(
-                session.scalars(
+                db_session.scalars(
                     select(DeleteAuditRow)
-                    .where(DeleteAuditRow.scope == scope)
+                    .where(DeleteAuditRow.session == session)
                     .order_by(DeleteAuditRow.created_at.desc())
                     .limit(limit)
                 ).all()
@@ -272,14 +272,14 @@ class PostgresMemoryRepository:
         audits.sort(key=lambda audit: audit.created_at, reverse=True)
         return audits[:limit]
 
-    def scrub_deleted_memory_from_audits(self, *, scope: str, memory_ids: list[str]) -> None:
+    def scrub_deleted_memory_from_audits(self, *, session: str, memory_ids: list[str]) -> None:
         """从查询审计中清理已硬删除记忆的原文片段。"""
 
         if not memory_ids:
             return
         deleted = set(memory_ids)
         with Session(self.engine) as session:
-            rows = list(session.scalars(select(QueryAuditRow).where(QueryAuditRow.scope == scope)).all())
+            rows = list(session.scalars(select(QueryAuditRow).where(QueryAuditRow.session == session)).all())
             for row in rows:
                 selected = set(row.selected_memory_ids or [])
                 row.retrieved = [
@@ -305,7 +305,7 @@ def _memory_from_row(row: MemoryRow) -> MemoryRecord:
 
     return MemoryRecord(
         memory_id=row.memory_id,
-        scope=row.scope,
+        session=row.session,
         content=row.content,
         occurred_at=row.occurred_at,
         created_at=row.created_at,
@@ -317,7 +317,7 @@ def _query_audit_from_row(row: QueryAuditRow) -> QueryAuditRecord:
 
     return QueryAuditRecord(
         query_id=row.query_id,
-        scope=row.scope,
+        session=row.session,
         original_query=row.original_query,
         query_type=row.query_type,
         rewritten_queries=list(row.rewritten_queries or []),
@@ -337,7 +337,7 @@ def _delete_audit_from_row(row: DeleteAuditRow) -> DeleteAuditRecord:
 
     return DeleteAuditRecord(
         delete_id=row.delete_id,
-        scope=row.scope,
+        session=row.session,
         target=dict(row.target or {}),
         dry_run=bool(row.dry_run),
         matched_memory_ids=list(row.matched_memory_ids or []),
