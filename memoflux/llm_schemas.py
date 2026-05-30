@@ -60,4 +60,16 @@ class AnswerSynthesisOutput(BaseModel):
     answer: str
     confidence: float = Field(default=0.6, ge=0.0, le=1.0)
     used_memory_ids: list[str] = Field(default_factory=list)
+    relevance_by_id: dict[str, str] = Field(default_factory=dict)
     uncertainties: list[str] = Field(default_factory=list)
+
+    @field_validator("relevance_by_id", mode="before")
+    @classmethod
+    def coerce_relevance_by_id(cls, value):
+        """兼容 LLM 缺失或返回非字典引用理由的情况。"""
+
+        if value is None:
+            return {}
+        if not isinstance(value, dict):
+            return {}
+        return {str(key): str(reason) for key, reason in value.items()}

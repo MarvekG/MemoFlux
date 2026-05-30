@@ -474,6 +474,22 @@ def test_answer_synthesis_output_accepts_used_memory_ids():
     assert output.uncertainties == ["u"]
 
 
+def test_answer_synthesis_output_accepts_relevance_by_id():
+    from memoflux.llm_schemas import AnswerSynthesisOutput
+
+    output = AnswerSynthesisOutput.model_validate(
+        {
+            "answer": "Atlas 延期原因是数据库迁移回滚方案不完整。",
+            "confidence": 0.9,
+            "used_memory_ids": ["m1"],
+            "relevance_by_id": {"m1": "该记忆直接说明 Atlas 延期原因。"},
+            "uncertainties": [],
+        }
+    )
+
+    assert output.relevance_by_id == {"m1": "该记忆直接说明 Atlas 延期原因。"}
+
+
 def test_postgres_scrub_uses_session_value_in_query(monkeypatch):
     from memoflux.storage import postgres
 
