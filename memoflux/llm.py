@@ -37,6 +37,7 @@ class LocalLLMClient:
             answer=answer,
             confidence=0.6,
             used_memory_ids=[memory.memory_id for memory in memories],
+            relevance_by_id={memory.memory_id: "本地模式将该候选记忆用于答案。" for memory in memories},
             uncertainties=[],
         )
         return LLMResult(output=output.model_dump(), input_tokens=_estimate_tokens(query), output_tokens=_estimate_tokens(answer), model="local")
@@ -85,19 +86,32 @@ class OpenAICompatibleLLMClient:
         messages = [
             {
                 "role": "system",
-                "content": "你是 MemoFlux 答案整合器。只能基于给定记忆回答。只输出 JSON：answer、confidence、used_memory_ids、uncertainties。confidence 必须是 0 到 1 的数字，used_memory_ids 必须来自候选 memory_id。",
+                "content": "你是 MemoFlux 答案整合器。只能基于给定记忆回答。先判断候选记忆是否真正回答问题以及是否与问题主体一致；不要猜测。只输出 JSON：answer、confidence、used_memory_ids、relevance_by_id、uncertainties。confidence 必须是 0 到 1 的数字。used_memory_ids 必须来自候选 memory_id。relevance_by_id 的 key 必须来自候选 memory_id，value 用一句话说明为什么该记忆支持答案。如果候选没有足够证据回答问题，answer 必须是：当前 session 中没有足够记忆支持回答该问题。confidence 设为 0 到 0.3，used_memory_ids 返回空数组。",
             },
             {"role": "user", "content": prompt_input.model_dump_json()},
         ]
         result = self._chat(messages)
-        raw_output = _parse_json_object(result.output.get("content", ""), fallback={"answer": memory_text, "confidence": 0.4, "used_memory_ids": [memory.memory_id for memory in memories], "uncertainties": []})
+        raw_output = _parse_json_object(
+            result.output.get("content", ""),
+            fallback={
+                "answer": memory_text,
+                "confidence": 0.4,
+                "used_memory_ids": [memory.memory_id for memory in memories],
+                "relevance_by_id": {
+                    memory.memory_id: "模型输出不可解析，使用候选记忆作为降级答案来源。"
+                    for memory in memories
+                },
+                "uncertainties": ["invalid_llm_output"],
+            },
+        )
         try:
             output = AnswerSynthesisOutput.model_validate(raw_output)
         except ValidationError:
             output = AnswerSynthesisOutput(
-                answer=str(raw_output.get("answer") or memory_text),
+                answer=str(raw_output.get("answer") or "当前 session 中没有足够记忆支持回答该问题。"),
                 confidence=0.6,
                 used_memory_ids=[],
+                relevance_by_id={},
                 uncertainties=["invalid_llm_output"],
             )
         return LLMResult(output=output.model_dump(), input_tokens=result.input_tokens, output_tokens=result.output_tokens, model=result.model)
