@@ -1,0 +1,124 @@
+from __future__ import annotations
+
+import os
+from typing import Any
+
+from memoflux.config import load_settings
+
+
+class EmbeddingService:
+    """通过本地模型或 OpenAI 兼容接口生成向量。"""
+
+    def __init__(self) -> None:
+        settings = load_settings()
+        self._provider = settings.embedding_provider.strip().lower()
+        self._dimension = int(settings.embedding_dimension)
+        self._model = settings.embedding_model
+        self._api_key = settings.embedding_api_key
+        self._base_url = settings.embedding_base_url
+        self._timeout_seconds = float(settings.embedding_timeout_seconds)
+        self._cache_dir = settings.embedding_cache_dir
+        self._local_files_only = settings.embedding_local_files_only
+        self._hf_endpoint = settings.hf_endpoint
+        self._local_model: Any | None = None
+
+    @property
+    def provider(self) -> str:
+        """返回当前配置的向量服务提供方。"""
+
+        return self._provider
+
+    @property
+    def dimension(self) -> int:
+        """返回当前配置的向量维度。"""
+
+        return self._dimension
+
+    def embed_text(self, text: str) -> list[float]:
+        """生成单条文本的向量。
+
+        Args:
+            text: 待向量化的文本。
+
+        Returns:
+            归一化后的浮点向量。
+        """
+
+        vectors = self.embed_texts([text])
+        return vectors[0] if vectors else []
+
+    def embed_texts(self, texts: list[str]) -> list[list[float]]:
+        """使用配置的提供方批量生成文本向量。
+
+        Args:
+            texts: 待向量化的文本列表。
+
+        Returns:
+            与输入顺序一致的向量列表。
+
+        Raises:
+            ValueError: 配置了不支持的向量提供方。
+        """
+
+        normalized = [str(text or "") for text in texts]
+        if not normalized:
+            return []
+        if self._provider == "local":
+            return self._embed_local_texts(normalized)
+        if self._provider == "openai_compatible":
+            return self._embed_openai_compatible_texts(normalized)
+        raise ValueError(f"Unsupported MEMOFLUX_EMBEDDING_PROVIDER: {self._provider}")
+
+    def _embed_local_texts(self, texts: list[str]) -> list[list[float]]:
+        model = self._load_local_model()
+        vectors = model.encode(
+            texts,
+            batch_size=len(texts),
+            normalize_embeddings=True,
+            convert_to_numpy=False,
+            show_progress_bar=False,
+        )
+        coerced = [[float(value) for value in vector] for vector in vectors]
+        for vector in coerced:
+            self._validate_dimension(vector)
+        return coerced
+
+    def _load_local_model(self) -> Any:
+        if self._local_model is not None:
+            return self._local_model
+        if self._hf_endpoint:
+            os.environ.setdefault("HF_ENDPOINT", self._hf_endpoint)
+        from sentence_transformers import SentenceTransformer
+
+        kwargs: dict[str, Any] = {"local_files_only": self._local_files_only}
+        if self._cache_dir:
+            kwargs["cache_folder"] = self._cache_dir
+        self._local_model = SentenceTransformer(self._model, **kwargs)
+        return self._local_model
+
+    def _embed_openai_compatible_texts(self, texts: list[str]) -> list[list[float]]:
+        if not self._api_key:
+            raise ValueError("MEMOFLUX_EMBEDDING_API_KEY is required for openai_compatible embedding provider")
+        from openai import OpenAI
+
+        kwargs: dict[str, Any] = {"api_key": self._api_key, "timeout": self._timeout_seconds}
+        if self._base_url:
+            kwargs["base_url"] = self._base_url
+        client = OpenAI(**kwargs)
+        response = client.embeddings.create(model=self._model, input=texts, timeout=self._timeout_seconds)
+        ordered = sorted(response.data, key=lambda item: int(item.index))
+        vectors = [[float(value) for value in item.embedding] for item in ordered]
+        for vector in vectors:
+            self._validate_dimension(vector)
+        return vectors
+
+    def _validate_dimension(self, vector: list[float]) -> None:
+        actual = len(vector)
+        if actual != self._dimension:
+            raise ValueError(
+                f"Embedding dimension mismatch: expected {self._dimension}, got {actual}. "
+                "Check MEMOFLUX_EMBEDDING_MODEL and MEMOFLUX_EMBEDDING_DIM."
+            )
+
+
+embedding_service = EmbeddingService()

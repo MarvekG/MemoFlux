@@ -1,0 +1,25 @@
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Runtime data and logs
+data/
+logs/
+*.log
+
+# Git and local environment
+.git/
+.gitignore
+.github/
+.env
+.env.local
+
+# Local tooling
+.idea/
+.vscode/
+*.swp
+*.bak

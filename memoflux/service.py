@@ -1,0 +1,140 @@
+from __future__ import annotations
+
+from datetime import datetime
+from uuid import uuid4
+
+from memoflux.llm import LLMResult, LocalLLMClient
+from memoflux.models import DeleteResult, RecallReference, RecallResult
+from memoflux.retrieval import build_terms, is_history_query
+from memoflux.services.embedding_service import embedding_service
+
+NO_ANSWER = "未找到可用于回答该问题的记忆。"
+
+
+class MemoFluxService:
+    """MemoFlux 业务服务。"""
+
+    def __init__(self, repository, llm_client=None, embedding_client=None) -> None:
+        self.repository = repository
+        self.llm_client = llm_client or LocalLLMClient()
+        self.embedding_service = embedding_client or embedding_service
+
+    def ingest(self, *, scope: str, content: str, occurred_at: datetime):
+        """写入一条记忆。"""
+
+        if not scope:
+            raise ValueError("scope is required")
+        if not content:
+            raise ValueError("content is required")
+        if occurred_at is None:
+            raise ValueError("occurred_at is required")
+        embedding = LLMResult(output={"embedding": self.embedding_service.embed_text(content)})
+        self.repository.record_usage(
+            operation="embedding:ingest",
+            input_tokens=embedding.input_tokens,
+            output_tokens=embedding.output_tokens,
+        )
+        return self.repository.insert_memory(
+            scope=scope,
+            content=content,
+            occurred_at=occurred_at,
+            embedding=embedding.output.get("embedding"),
+        )
+
+    def recall(self, *, scope: str, query: str, top_k: int = 12) -> RecallResult:
+        """召回同一 scope 内的候选记忆并生成答案。"""
+
+        if not scope:
+            raise ValueError("scope is required")
+        if not query:
+            raise ValueError("query is required")
+        plan = self.llm_client.plan_query(query=query)
+        rewritten_queries = plan.output.get("rewritten_queries") or [query]
+        terms = set()
+        for rewritten_query in rewritten_queries:
+            terms.update(build_terms(str(rewritten_query)))
+        query_embedding = LLMResult(output={"embedding": self.embedding_service.embed_text(query)})
+        self.repository.record_usage(
+            operation="embedding:recall",
+            input_tokens=query_embedding.input_tokens,
+            output_tokens=query_embedding.output_tokens,
+        )
+        memories = self.repository.search_memories(
+            scope=scope,
+            terms=terms,
+            limit=top_k,
+            query_embedding=query_embedding.output.get("embedding"),
+        )
+        if is_history_query(query):
+            memories.sort(key=lambda memory: memory.occurred_at)
+        self.repository.record_usage(operation="query_planner", input_tokens=plan.input_tokens, output_tokens=plan.output_tokens)
+        if not memories:
+            return RecallResult(query_id=uuid4().hex, query_type="direct", answer=NO_ANSWER, references=[])
+        synthesis = self.llm_client.synthesize_answer(query=query, memories=memories)
+        self.repository.record_usage(
+            operation="answer_synthesizer",
+            input_tokens=synthesis.input_tokens,
+            output_tokens=synthesis.output_tokens,
+        )
+        references = [
+            RecallReference(
+                memory_id=memory.memory_id,
+                occurred_at=memory.occurred_at,
+                quote=memory.content,
+                relevance="文本/时间候选匹配",
+            )
+            for memory in memories
+        ]
+        return RecallResult(
+            query_id=uuid4().hex,
+            query_type=str(plan.output.get("query_type") or ("history" if is_history_query(query) else "direct")),
+            answer=str(synthesis.output.get("answer") or "\n".join(memory.content for memory in memories)),
+            references=references,
+            confidence=float(synthesis.output.get("confidence") or 0.6),
+            uncertainties=[],
+        )
+
+    def delete(self, *, scope: str, memory_ids: list[str] | None, query: str | None, dry_run: bool) -> DeleteResult:
+        """删除记忆；query 模式只允许 dry-run。"""
+
+        if not scope:
+            raise ValueError("scope is required")
+        if query and not dry_run:
+            raise ValueError("query delete requires dry_run=true")
+        if not memory_ids and not query:
+            raise ValueError("memory_ids or query is required")
+        if query:
+            candidates = self.repository.search_memories(scope=scope, terms=build_terms(query), limit=12)
+            matched = [memory.memory_id for memory in candidates]
+            self.repository.record_usage(operation="delete_dry_run", input_tokens=_estimate_tokens(query), output_tokens=0)
+            return DeleteResult(delete_id=uuid4().hex, matched_memory_ids=matched, affected_memory_ids=[], status="ok")
+        matched = self.repository.delete_memories(scope=scope, memory_ids=memory_ids or [])
+        return DeleteResult(delete_id=uuid4().hex, matched_memory_ids=matched, affected_memory_ids=matched, status="ok")
+
+    def preview(self, *, scope: str, limit: int = 50):
+        """预览同一 scope 内的原始记忆。"""
+
+        return self.repository.list_memories(scope=scope, limit=limit)
+
+    def usage_stats(self):
+        """返回聚合用量统计。"""
+
+        return self.repository.usage_stats()
+
+    def clear_usage_stats(self) -> int:
+        """清空聚合用量统计。"""
+
+        return self.repository.clear_usage_stats()
+
+
+def _estimate_tokens(text: str) -> int:
+    """粗略估算文本 token 数，用于无真实 LLM 用量时的聚合统计。
+
+    Args:
+        text: 待估算的文本。
+
+    Returns:
+        至少为 1 的估算 token 数。
+    """
+
+    return max(1, len(text) // 2)

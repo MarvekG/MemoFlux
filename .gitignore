@@ -1,0 +1,17 @@
+.env
+.pytest_cache/
+__pycache__/
+build/
+dist/
+*.egg-info/
+logs/
+*.log
+evals/reports/
+evals/cases/_tmp*.json
+
+data/*
+!data/.gitkeep
+!data/models/
+data/models/*
+!data/models/.gitkeep
+.codex
