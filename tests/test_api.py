@@ -48,6 +48,22 @@ class StringConfidenceLLMClient(FakeLLMClient):
         )
 
 
+class SelectiveReferenceLLMClient(FakeLLMClient):
+    def synthesize_answer(self, *, query: str, memories: list) -> LLMResult:
+        self.calls.append(("synthesize_answer", query, len(memories)))
+        return LLMResult(
+            output={
+                "answer": "只引用第一条记忆",
+                "confidence": 0.7,
+                "used_memory_ids": [memories[0].memory_id],
+                "uncertainties": [],
+            },
+            input_tokens=20,
+            output_tokens=10,
+            model="fake",
+        )
+
+
 
 class FakeEmbeddingService:
     def __init__(self) -> None:
@@ -263,6 +279,23 @@ def test_ingest_and_recall_use_embeddings_for_vector_retrieval():
     assert repository.search_embeddings == [[0.1, 0.2, 0.3]]
     assert fake_embedding_service.calls == ["Atlas 发布延期，因为数据库迁移回滚方案不完整。", "Atlas 为什么延期？"]
     assert [call[0] for call in llm_client.calls] == ["plan_query", "synthesize_answer"]
+
+
+def test_recall_references_only_include_used_memory_ids():
+    llm_client = SelectiveReferenceLLMClient()
+    app = create_app(repository=MemoryRepository(), llm_client=llm_client, embedding_client=FakeEmbeddingService())
+    from fastapi.testclient import TestClient
+
+    client = TestClient(app)
+    client.post("/v1/ingest", json={"scope": "s", "content": "第一条 Atlas 记忆。", "occurred_at": "2026-05-01T10:00:00Z"})
+    client.post("/v1/ingest", json={"scope": "s", "content": "第二条 Atlas 记忆。", "occurred_at": "2026-05-02T10:00:00Z"})
+
+    response = client.post("/v1/recall", json={"scope": "s", "query": "Atlas?", "top_k": 2})
+
+    assert response.status_code == 200
+    references = response.json()["data"]["references"]
+    assert len(references) == 1
+    assert references[0]["quote"] == "第一条 Atlas 记忆。"
 
 
 def test_audits_return_persisted_recall_records():

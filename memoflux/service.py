@@ -92,6 +92,7 @@ class MemoFluxService:
             input_tokens=synthesis.input_tokens,
             output_tokens=synthesis.output_tokens,
         )
+        used_memories = _filter_used_memories(memories, list(synthesis.output.get("used_memory_ids") or []))
         references = [
             RecallReference(
                 memory_id=memory.memory_id,
@@ -99,7 +100,7 @@ class MemoFluxService:
                 quote=memory.content,
                 relevance="文本/时间候选匹配",
             )
-            for memory in memories
+            for memory in used_memories
         ]
         result = RecallResult(
             query_id=query_id,
@@ -118,7 +119,7 @@ class MemoFluxService:
                 rewritten_queries=[str(item) for item in rewritten_queries],
                 candidate_limit=top_k,
                 retrieved=[_audit_memory_item(memory) for memory in memories],
-                selected_memory_ids=[memory.memory_id for memory in memories],
+                selected_memory_ids=[memory.memory_id for memory in used_memories],
                 final_answer=result.answer,
                 status="ok",
                 error_stage=None,
@@ -200,6 +201,24 @@ class MemoFluxService:
         """清空聚合用量统计。"""
 
         return self.repository.clear_usage_stats()
+
+
+def _filter_used_memories(memories, used_memory_ids: list[str]) -> list:
+    """按 LLM 声明使用的记忆 ID 过滤候选，非法或缺失时退回全部候选。
+
+    Args:
+        memories: 候选记忆列表。
+        used_memory_ids: LLM 输出的实际引用记忆 ID。
+
+    Returns:
+        用于 API references 的记忆列表。
+    """
+
+    if not used_memory_ids:
+        return memories
+    by_id = {memory.memory_id: memory for memory in memories}
+    filtered = [by_id[memory_id] for memory_id in used_memory_ids if memory_id in by_id]
+    return filtered or memories
 
 
 def _audit_memory_item(memory) -> dict:
