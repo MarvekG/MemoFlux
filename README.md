@@ -1,6 +1,6 @@
 # MemoFlux
 
-MemoFlux is a lightweight memory service that stores original memory text by explicit scope and recalls memories through query rewrite, pgvector retrieval, PostgreSQL text/time fallback, and answer synthesis.
+MemoFlux is a lightweight memory service that stores original memory text by explicit session and recalls memories through query rewrite, pgvector retrieval, PostgreSQL text/time fallback, and answer synthesis.
 
 ## Runtime LLM
 

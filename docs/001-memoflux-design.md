@@ -2,14 +2,14 @@
 
 ## 1. 定位
 
-MemoFlux 是一个长期记忆服务，用于保存原始记忆文本，通过调用方显式传入的 `scope` 做强隔离，并通过 LLM 驱动的检索链路回答自然语言问题。
+MemoFlux 是一个长期记忆服务，用于保存原始记忆文本，通过调用方显式传入的 `session` 做强隔离，并通过 LLM 驱动的检索链路回答自然语言问题。
 
 MemoFlux 按独立、长期演进的服务设计，而不是某个项目内部的辅助模块。第一版刻意保持业务数据模型极简，把复杂语义判断集中放在 LLM query rewrite 和答案整合阶段，同时通过详细审计日志保证可排查、可评估、可迭代。
 
 ## 2. 目标
 
 - 以文本形式保存原始记忆内容，不切片、不抽取实体、不保存关系边、不保存因果边、不生成持久化摘要。
-- 使用调用方显式传入的 `scope` 做严格隔离，不同 `scope` 之间的记忆互相不可见。
+- 使用调用方显式传入的 `session` 做严格隔离，不同 `session` 之间的记忆互相不可见。
 - 通过同一条三层查询链路支持直接查询、关联查询、历史查询和前因后果查询。
 - 每条记忆必须提供事件发生时间 `occurred_at`，确保历史和因果回答按事件时间组织，而不是按写入时间误排。
 - 原始记忆内容写入后不可修改，纠错通过追加新记忆表达。
@@ -22,7 +22,7 @@ MemoFlux 按独立、长期演进的服务设计，而不是某个项目内部�
 
 - 第一版不构建 entity-centered memory graph。
 - 不持久化实体、事件、关系边、因果边或记忆切片。
-- 不支持跨 `scope` 查询、`scope` 继承或自动扩展 `scope`。
+- 不支持跨 `session` 查询、`session` 继承或自动扩展 `session`。
 - 不允许更新原始记忆文本；删除是唯一例外，它会不可恢复地移除原文。
 - 不引入 LlamaIndex 或独立向量库；向量检索限定在 PostgreSQL pgvector 内，避免新增运行时依赖。
 - 不用关键词、正则、白名单、黑名单或硬编码规则模拟语义判断、因果判断或相关性判断。
@@ -30,19 +30,18 @@ MemoFlux 按独立、长期演进的服务设计，而不是某个项目内部�
 
 ## 4. 核心概念
 
-### 4.1 Scope
+### 4.1 Session
 
-`scope` 是调用方提供的不透明字符串。MemoFlux 只校验它存在，并在写入、读取、召回、候选检索、删除和审计查询中使用精确匹配。
+`session` 是调用方提供的不透明字符串。MemoFlux 只校验它存在，并在写入、读取、召回、候选检索、删除和审计查询中使用精确匹配。
 
 示例：
 
 ```text
-user:123:general
-user:123:stock:600000.SH
-org:alpha:project:atlas
+session:atlas-release-202605
+org:alpha:session:atlas-release-202605
 ```
 
-MemoFlux 不解释 `scope` 的层级含义。查询 `user:123` 不会看到 `user:123:stock:600000.SH` 的记忆，除非调用方一开始就把相关记忆写入同一个精确 `scope`。
+MemoFlux 不解释 `session` 的层级含义。查询 `session:atlas` 不会看到 `session:atlas-release-202605` 的记忆，除非调用方一开始就把相关记忆写入同一个精确 `session`。
 
 ### 4.2 Memory
 
@@ -50,7 +49,7 @@ MemoFlux 不解释 `scope` 的层级含义。查询 `user:123` 不会看到 `use
 
 ```text
 memory_id
-scope
+session
 content
 occurred_at
 created_at
@@ -72,9 +71,9 @@ LLM Query Planner
   -> LLM Answer Synthesizer
 ```
 
-候选检索只负责在一个精确 `scope` 内找出可能相关的原始 memory。最终答案仍由 LLM 基于回填后的 `memories.content` 生成。
+候选检索只负责在一个精确 `session` 内找出可能相关的原始 memory。最终答案仍由 LLM 基于回填后的 `memories.content` 生成。
 
-第一版在 `memories.embedding` 保存派生向量。原始 `content` 仍是事实来源；embedding 只用于同一 `scope` 内候选召回，删除记忆时随原文一起硬删除。
+第一版在 `memories.embedding` 保存派生向量。原始 `content` 仍是事实来源；embedding 只用于同一 `session` 内候选召回，删除记忆时随原文一起硬删除。
 
 ## 5. 数据模型
 
@@ -82,7 +81,7 @@ LLM Query Planner
 
 ```text
 memory_id: UUID primary key
-scope: text not null
+session: text not null
 content: text not null
 embedding: vector(768) null
 occurred_at: timestamptz not null
@@ -92,8 +91,8 @@ created_at: timestamptz not null
 建议索引：
 
 ```text
-(scope, occurred_at)
-(scope, created_at)
+(session, occurred_at)
+(session, created_at)
 ```
 
 规则：
@@ -107,9 +106,9 @@ created_at: timestamptz not null
 
 第一版不新增独立向量表，直接在 `memories.embedding` 保存派生向量，并依赖以下数据库能力：
 
-- `(scope, occurred_at)` 支持同一 scope 内的历史查询和时间窗口过滤。
-- `(scope, created_at)` 支持预览和调试分页。
-- pgvector `embedding` 支持同一 scope 内最近邻召回。
+- `(session, occurred_at)` 支持同一 session 内的历史查询和时间窗口过滤。
+- `(session, created_at)` 支持预览和调试分页。
+- pgvector `embedding` 支持同一 session 内最近邻召回。
 - PostgreSQL 文本检索能力支持 rewritten query、关键词组和原文匹配兜底。
 
 如果后续引入 LlamaIndex 或其他 node store，新增存储必须是派生数据，不能替代 `memories` 作为事实来源。
@@ -120,7 +119,7 @@ created_at: timestamptz not null
 
 ```text
 query_id: UUID primary key
-scope: text not null
+session: text not null
 original_query: text not null
 query_type: text not null
 query_type_reason: text null
@@ -162,7 +161,7 @@ created_at: timestamptz not null
 
 ```text
 delete_id: UUID primary key
-scope: text not null
+session: text not null
 target: jsonb not null
 dry_run: boolean not null
 matched_memory_ids: uuid[] not null
@@ -179,7 +178,7 @@ created_at: timestamptz not null
 
 ```text
 POST /v1/ingest
-  -> 校验 scope/content/occurred_at
+  -> 校验 session/content/occurred_at
   -> 使用配置的 embedding provider 生成向量
   -> 写入 immutable memories 记录
   -> 返回 memory_id
@@ -187,7 +186,7 @@ POST /v1/ingest
 
 校验规则：
 
-- `scope` 必填。
+- `session` 必填。
 - `content` 必填。
 - `occurred_at` 必填。
 - 缺少 `occurred_at` 直接返回校验错误，不写入任何数据。
@@ -211,7 +210,7 @@ MemoFlux 的删除就是遗忘，语义是不可恢复地删除原始记忆：
 MemoFlux 使用固定三层查询架构：
 
 ```text
-用户 query + 精确 scope
+用户 query + 精确 session
   -> LLM Query Planner
   -> Candidate Retriever
   -> LLM Answer Synthesizer
@@ -243,12 +242,12 @@ Planner 可以为一次用户 query 生成多个 rewritten query。这样可以�
 
 ### 7.2 第二层：Candidate Retriever
 
-MemoFlux 对每个 rewritten query 执行同一 `scope` 内的候选检索。
+MemoFlux 对每个 rewritten query 执行同一 `session` 内的候选检索。
 
 必需过滤条件：
 
 ```text
-scope == request.scope
+session == request.session
 ```
 
 第一版候选检索优先使用 pgvector 最近邻召回，并保留 PostgreSQL 文本匹配、可选全文检索、时间窗口过滤和 `occurred_at` 排序作为兜底与诊断能力。Retriever 合并所有 rewritten query 的候选，按 `memory_id` 去重，再从 `memories` 回填完整 memory，最后把候选集合交给答案整合层。
@@ -259,7 +258,7 @@ scope == request.scope
 - 历史查询需要召回足够候选，并按 `occurred_at` 提供给答案整合层。
 - 前因后果查询在候选支持时，应包含目标事件前后的相关记忆，并按 `occurred_at` 提供给答案整合层。
 
-Retriever 不允许为了补充背景而搜索其他 `scope`。
+Retriever 不允许为了补充背景而搜索其他 `session`。
 
 ### 7.3 第三层：LLM Answer Synthesizer
 
@@ -309,7 +308,7 @@ query planner 输出
 预期行为：
 
 - 将用户 query 改写成更适合文本检索的表达。
-- 在同一 `scope` 内召回最强候选。
+- 在同一 `session` 内召回最强候选。
 - 只基于召回记忆回答。
 - 引用被使用的记忆。
 
@@ -326,7 +325,7 @@ query planner 输出
 预期行为：
 
 - 生成多个相关 rewritten query。
-- 在同一 `scope` 内召回语义相近记忆。
+- 在同一 `session` 内召回语义相近记忆。
 - 解释每条记忆为什么相关。
 - 不把文本没有支持的关系说成显式关系。
 
@@ -360,7 +359,7 @@ query planner 输出
 预期行为：
 
 - 生成面向原因和结果的 rewritten query。
-- 在同一 `scope` 内召回候选。
+- 在同一 `session` 内召回候选。
 - 按 `occurred_at` 排列证据。
 - 谨慎表达因果关系。如果记忆只能支持先后顺序，不能证明因果，应明确说明。
 - 每个因果判断都必须引用支撑记忆。
@@ -382,7 +381,7 @@ query planner 输出
 /v1/usage/stats
 ```
 
-第一版 API 不内建认证，也不要求调用方提供 token、session 或 API key。MemoFlux 本身不解释用户、组织、项目或股票含义，只要求调用方在请求体或 query string 中传入精确 `scope`。如果部署场景需要访问控制，应由内网隔离、反向代理、API gateway 或上游业务系统负责；MemoFlux 内部仍只依赖精确 `scope` 过滤保证数据隔离。
+第一版 API 不内建认证，也不要求调用方提供 token、session 或 API key。MemoFlux 本身不解释用户、组织、项目或股票含义，只要求调用方在请求体或 query string 中传入精确 `session`。如果部署场景需要访问控制，应由内网隔离、反向代理、API gateway 或上游业务系统负责；MemoFlux 内部仍只依赖精确 `session` 过滤保证数据隔离。
 
 统一响应格式：
 
@@ -421,7 +420,7 @@ POST /v1/ingest
 
 ```json
 {
-  "scope": "user:123:general",
+  "session": "session:atlas-release-202605",
   "content": "Atlas 发布延期，因为数据库迁移回滚方案不完整。",
   "occurred_at": "2026-05-01T10:00:00Z"
 }
@@ -430,7 +429,7 @@ POST /v1/ingest
 字段规则：
 
 ```text
-scope: 必填，非空字符串，精确隔离边界。
+session: 必填，非空字符串，精确隔离边界。
 content: 必填，非空字符串，原始记忆正文。
 occurred_at: 必填，ISO 8601 时间，表示事件发生时间。
 ```
@@ -441,7 +440,7 @@ occurred_at: 必填，ISO 8601 时间，表示事件发生时间。
 {
   "data": {
     "memory_id": "018f7f3e-2d7d-7d63-b5d2-5d8b0f6a3b21",
-    "scope": "user:123:general",
+    "session": "session:atlas-release-202605",
     "occurred_at": "2026-05-01T10:00:00Z",
     "created_at": "2026-05-30T08:30:00Z"
   },
@@ -464,7 +463,7 @@ POST /v1/recall
 
 ```json
 {
-  "scope": "user:123:general",
+  "session": "session:atlas-release-202605",
   "query": "Atlas 发布为什么延期？",
   "include_references": true,
   "top_k": 12
@@ -474,7 +473,7 @@ POST /v1/recall
 字段规则：
 
 ```text
-scope: 必填，只允许一个精确 scope。
+session: 必填，只允许一个精确 session。
 query: 必填，自然语言查询。
 include_references: 可选，默认 true；false 时响应不返回 references。
 top_k: 可选，默认 12；限制每个 rewritten query 或合并后的候选规模，具体含义由实现固定并写入审计。
@@ -506,10 +505,10 @@ top_k: 可选，默认 12；限制每个 rewritten query 或合并后的候选�
 语义：
 
 - `query_type` 由 LLM Query Planner 自动判断。
-- 查询只在一个精确 `scope` 内执行。
+- 查询只在一个精确 `session` 内执行。
 - 默认返回引用证据。
 - `include_references=false` 只影响响应体，不影响审计日志中保存的候选和引用信息。
-- 如果候选证据不足，答案应明确说明无法从当前 `scope` 记忆中得出结论，而不是编造。
+- 如果候选证据不足，答案应明确说明无法从当前 `session` 记忆中得出结论，而不是编造。
 
 ### 9.4 Prompt 调试：`POST /v1/prompt-eval`
 
@@ -523,7 +522,7 @@ POST /v1/prompt-eval
 {
   "prompt_key": "query_planner",
   "payload": {
-    "scope": "user:123:general",
+    "session": "session:atlas-release-202605",
     "query": "Atlas 发布为什么延期？"
   }
 }
@@ -570,7 +569,7 @@ POST /v1/delete
 
 ```json
 {
-  "scope": "user:123:general",
+  "session": "session:atlas-release-202605",
   "memory_ids": ["018f7f3e-2d7d-7d63-b5d2-5d8b0f6a3b21"],
   "dry_run": false
 }
@@ -579,7 +578,7 @@ POST /v1/delete
 字段规则：
 
 ```text
-scope: 必填，精确 scope。
+session: 必填，精确 session。
 memory_ids: 可选，明确要删除的 memory_id 列表。
 query: 可选，自然语言描述，用于 dry-run 查找候选记忆。
 dry_run: 可选，默认 true；query 模式必须先 dry_run。
@@ -589,7 +588,7 @@ dry_run: 可选，默认 true；query 模式必须先 dry_run。
 
 ```json
 {
-  "scope": "user:123:general",
+  "session": "session:atlas-release-202605",
   "memory_ids": ["..."],
   "dry_run": false
 }
@@ -597,7 +596,7 @@ dry_run: 可选，默认 true；query 模式必须先 dry_run。
 
 ```json
 {
-  "scope": "user:123:general",
+  "session": "session:atlas-release-202605",
   "query": "删除 Atlas 发布延期的数据库迁移回滚方案细节",
   "dry_run": true
 }
@@ -609,7 +608,7 @@ dry_run: 可选，默认 true；query 模式必须先 dry_run。
 {
   "data": {
     "delete_id": "018f809f-7dd8-7c90-8e6f-1f64a9c7c0fa",
-    "scope": "user:123:general",
+    "session": "session:atlas-release-202605",
     "dry_run": false,
     "matched_memory_ids": ["018f7f3e-2d7d-7d63-b5d2-5d8b0f6a3b21"],
     "affected_memory_ids": ["018f7f3e-2d7d-7d63-b5d2-5d8b0f6a3b21"],
@@ -649,18 +648,18 @@ GET /v1/health
 }
 ```
 
-健康检查不需要认证，但不能泄露密钥、完整连接串、用户内容、scope 列表或记忆数量明细。
+健康检查不需要认证，但不能泄露密钥、完整连接串、用户内容、session 列表或记忆数量明细。
 
 ### 9.7 预览记忆：`GET /v1/preview`
 
 ```http
-GET /v1/preview?scope=user:123:general&from=2026-05-01T00:00:00Z&to=2026-05-31T23:59:59Z&limit=50&cursor=...
+GET /v1/preview?session=session:atlas-release-202605&from=2026-05-01T00:00:00Z&to=2026-05-31T23:59:59Z&limit=50&cursor=...
 ```
 
 查询参数：
 
 ```text
-scope: 必填，精确 scope。
+session: 必填，精确 session。
 from: 可选，occurred_at 起始时间。
 to: 可选，occurred_at 结束时间。
 limit: 可选，默认 50，最大值由服务配置控制。
@@ -676,7 +675,7 @@ order: 可选，occurred_at_asc 或 occurred_at_desc，默认 occurred_at_asc。
     "items": [
       {
         "memory_id": "...",
-        "scope": "user:123:general",
+        "session": "session:atlas-release-202605",
         "content": "Atlas 发布延期，因为数据库迁移回滚方案不完整。",
         "occurred_at": "2026-05-01T10:00:00Z",
         "created_at": "2026-05-30T08:30:00Z"
@@ -691,20 +690,20 @@ order: 可选，occurred_at_asc 或 occurred_at_desc，默认 occurred_at_asc。
 语义：
 
 - 该接口只用于预览原始记忆，不做 LLM 召回和答案整合。
-- 必须按精确 `scope` 查询。
+- 必须按精确 `session` 查询。
 - 默认按 `occurred_at` 排序。
 - 已删除记忆不会出现在 preview 中。
 
 ### 9.8 查询审计：`GET /v1/audits`
 
 ```http
-GET /v1/audits?scope=user:123:general&query_id=018f7f42-1a62-7b1a-87df-5ec04bbdc2d1&limit=50&cursor=...
+GET /v1/audits?session=session:atlas-release-202605&query_id=018f7f42-1a62-7b1a-87df-5ec04bbdc2d1&limit=50&cursor=...
 ```
 
 查询参数：
 
 ```text
-scope: 必填，精确 scope。
+session: 必填，精确 session。
 query_id: 可选，传入时返回单条审计详情。
 limit: 可选，默认 50。
 cursor: 可选，用于分页。
@@ -718,7 +717,7 @@ error_code: 可选，按错误码过滤。
     "items": [
       {
         "query_id": "...",
-        "scope": "user:123:general",
+        "session": "session:atlas-release-202605",
         "original_query": "Atlas 发布为什么延期？",
         "query_type": "causal",
         "query_type_reason": "用户询问原因，属于前因后果查询。",
@@ -730,7 +729,7 @@ error_code: 可选，按错误码过滤。
         ],
         "candidate_limit": 12,
         "candidate_filters": {
-          "scope": "user:123:general"
+          "session": "session:atlas-release-202605"
         },
         "retrieved": [
           {
@@ -756,7 +755,7 @@ error_code: 可选，按错误码过滤。
 }
 ```
 
-审计接口不内建认证，调用方必须传入精确 `scope`。MemoFlux 只返回该 `scope` 下的审计记录；如果部署方不希望任意调用方读取审计信息，应在反向代理、API gateway 或网络层限制 `/v1/audits` 访问。审计响应不返回单次 LLM token 消耗。
+审计接口不内建认证，调用方必须传入精确 `session`。MemoFlux 只返回该 `session` 下的审计记录；如果部署方不希望任意调用方读取审计信息，应在反向代理、API gateway 或网络层限制 `/v1/audits` 访问。审计响应不返回单次 LLM token 消耗。
 
 ### 9.9 查询聚合用量：`GET /v1/usage/stats`
 
@@ -805,7 +804,7 @@ hours: 可选，统计最近 N 小时；不传时返回当前保留窗口内的�
 语义：
 
 - 该接口只返回聚合用量，不返回任何单次调用的 token 消耗明细。
-- 聚合维度可包含 operation、model、provider 等，但不应包含原始 prompt、query、memory content 或 scope 列表。
+- 聚合维度可包含 operation、model、provider 等，但不应包含原始 prompt、query、memory content 或 session 列表。
 - `/v1/recall`、`/v1/prompt-eval` 和 `/v1/delete` 的 query dry-run 都可能产生 LLM 用量，这些用量进入聚合统计。
 
 ### 9.10 清空聚合用量：`DELETE /v1/usage/stats`
@@ -835,11 +834,11 @@ DELETE /v1/usage/stats
 
 校验错误：
 
-- 缺少 `scope`。
+- 缺少 `session`。
 - 缺少 `content`。
 - 缺少 `occurred_at`。
 - 时间格式非法。
-- memory 不存在于精确 `scope`。
+- memory 不存在于精确 `session`。
 - `/v1/delete` 使用 `query` 且 `dry_run=false`。
 - `/v1/delete` 同时缺少 `memory_ids` 和 `query`。
 
@@ -865,13 +864,13 @@ LLM planner 错误：
 
 ## 11. 安全与隔离
 
-- 所有查询必须包含且只能包含一个 `scope`。
-- 服务不能扩展、推断或继承 `scope`。
-- 每次候选检索必须包含精确 `scope`。
-- 从 `memories` 回填候选时必须再次校验精确 `scope`，不能只信任候选来源。
-- 删除必须按精确 `scope` 校验目标 memory，不能删除其他 `scope` 的记忆。
+- 所有查询必须包含且只能包含一个 `session`。
+- 服务不能扩展、推断或继承 `session`。
+- 每次候选检索必须包含精确 `session`。
+- 从 `memories` 回填候选时必须再次校验精确 `session`，不能只信任候选来源。
+- 删除必须按精确 `session` 校验目标 memory，不能删除其他 `session` 的记忆。
 - 删除后不得在业务表、preview 或 audit 响应中继续暴露原始正文。
-- 审计查询必须要求精确 `scope`，且不能返回其他 `scope` 的审计记录。
+- 审计查询必须要求精确 `session`，且不能返回其他 `session` 的审计记录。
 - MemoFlux 第一版不内建认证；生产部署如需访问控制，应由网络层、反向代理、API gateway 或上游业务系统负责。
 - 默认日志不记录完整记忆正文；只有本地调试显式开启时才允许。
 
@@ -898,7 +897,7 @@ answer model 与 token usage
 
 - Planner 是否正确判断查询类型？
 - 生成了哪些 rewritten query？
-- 候选检索是否严格限制在一个 `scope` 内？
+- 候选检索是否严格限制在一个 `session` 内？
 - 哪些 memories 被召回，分数是多少？
 - 最终答案使用了哪些召回记忆？
 - 答案是否引用了证据？
@@ -915,9 +914,9 @@ usage stats 应能回答：
 确定性测试：
 
 - 缺少 `occurred_at` 时写入失败。
-- 缺少 `scope` 时查询失败。
-- 查询不会搜索多个 `scope`。
-- candidate hydration 会排除其他 `scope` 的 memory。
+- 缺少 `session` 时查询失败。
+- 查询不会搜索多个 `session`。
+- candidate hydration 会排除其他 `session` 的 memory。
 - 删除 memory 后，业务表原文和审计响应中不再暴露原始正文。
 - 原始 memory content 不能更新。
 - `/v1/delete` 的 query 模式只能 dry-run，不能直接执行删除。
@@ -932,7 +931,7 @@ Mock LLM 测试：
 
 检索测试：
 
-- 不同 `scope` 中相同文本不会互相泄漏。
+- 不同 `session` 中相同文本不会互相泄漏。
 - 关联查询可以使用多个 rewritten query。
 - 历史查询按 `occurred_at` 组织证据。
 - 前因后果查询在证据不足时能区分“先后顺序”和“因果关系”。
@@ -945,9 +944,11 @@ Mock LLM 测试：
 
 ## 14. 相似记忆评估发现
 
-使用 100 条同一 `scope` 内的相似发布/延期记忆进行 smoke 评估后，当前召回链路暴露出以下问题：
+使用 100 条同一隔离边界内的相似发布/延期记忆进行 smoke 评估后，当前召回链路暴露出候选噪声问题。MemoFlux 后续将隔离边界收敛为 `session`，由调用方按会话写入和查询，避免把多个会话的记忆混入同一次召回。
 
-- pgvector `top_k` 在同一 `scope` 内混放多个项目时，会召回语义相似但主题不同的候选。例如查询 Atlas 时，候选中可能混入 Zephyr、Orion 或 Nova 的延期记录。
+当前召回链路暴露出以下问题：
+
+- pgvector `top_k` 在同一 `session` 内混放多个项目时，会召回语义相似但主题不同的候选。例如查询 Atlas 时，候选中可能混入 Zephyr、Orion 或 Nova 的延期记录。
 - 最终答案通常比候选更干净，因为 Answer Synthesizer 能过滤部分无关候选；但 API `references` 当前如果直接返回候选集合，会把无关候选暴露给调用方。
 - `references` 不应等同于 retrieved candidates。`retrieved` 是排障用候选集合，应保存在 audit；API `references` 应只包含最终答案实际使用的记忆。
 - Query Planner 生成的 `rewritten_queries` 当前主要用于审计。后续如果要提升召回，应对 rewritten queries 做多路 embedding 检索、合并和去重。
@@ -964,6 +965,6 @@ Mock LLM 测试：
 
 - 是否在 pgvector 之外引入更复杂的 hybrid retrieval 编排。第一版先保持 SQLAlchemy + pgvector + 文本/时间兜底。
 - 是否引入 LlamaIndex。第一版不引入；只有需要多向量后端或复杂 retriever 编排时再评估。
-- 同一 `scope` 内重复写入完全相同 `content` 时，是否允许重复。第一版可以允许重复，避免为了去重增加非必要 hash 字段。
+- 同一 `session` 内重复写入完全相同 `content` 时，是否允许重复。第一版可以允许重复，避免为了去重增加非必要 hash 字段。
 - 审计日志保留期。默认 30 天合理，但最终应由部署策略决定。
 - `include_references=false` 是否只影响 API 响应，还是同时影响审计持久化。当前建议只影响响应；审计仍保留详细引用和候选信息。
