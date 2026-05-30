@@ -387,3 +387,26 @@ def test_local_embedding_uses_configured_dimension():
     result = service.embed_text("hello")
 
     assert len(result) == 768
+
+
+def test_answer_synthesis_output_requires_numeric_confidence():
+    from pydantic import ValidationError
+    from memoflux.llm_schemas import AnswerSynthesisOutput
+
+    try:
+        AnswerSynthesisOutput.model_validate({"answer": "x", "confidence": "high", "used_memory_ids": []})
+    except ValidationError:
+        return
+    raise AssertionError("string confidence should be invalid")
+
+
+def test_answer_synthesis_output_accepts_used_memory_ids():
+    from memoflux.llm_schemas import AnswerSynthesisOutput
+
+    output = AnswerSynthesisOutput.model_validate(
+        {"answer": "x", "confidence": 0.8, "used_memory_ids": ["m1"], "uncertainties": ["u"]}
+    )
+
+    assert output.confidence == 0.8
+    assert output.used_memory_ids == ["m1"]
+    assert output.uncertainties == ["u"]
