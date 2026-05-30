@@ -76,9 +76,10 @@ class MemoFluxService:
                     query_type="direct",
                     rewritten_queries=[str(item) for item in rewritten_queries],
                     candidate_limit=top_k,
-                    retrieved=[],
-                    selected_memory_ids=[],
-                    final_answer=result.answer,
+                retrieved=[],
+                selected_memory_ids=[],
+                selection_reasons={},
+                final_answer=result.answer,
                     status="ok",
                     error_stage=None,
                     error_message=None,
@@ -92,13 +93,23 @@ class MemoFluxService:
             input_tokens=synthesis.input_tokens,
             output_tokens=synthesis.output_tokens,
         )
+        selection_reasons = _filter_selection_reasons(memories, synthesis.output.get("relevance_by_id") or {})
         used_memories = _filter_used_memories(memories, list(synthesis.output.get("used_memory_ids") or []))
+        used_memory_ids = {memory.memory_id for memory in used_memories}
+        selected_reasons = {
+            memory_id: reason
+            for memory_id, reason in selection_reasons.items()
+            if memory_id in used_memory_ids
+        }
         references = [
             RecallReference(
                 memory_id=memory.memory_id,
                 occurred_at=memory.occurred_at,
                 quote=memory.content,
-                relevance="文本/时间候选匹配",
+                relevance=selected_reasons.get(
+                    memory.memory_id,
+                    "Answer Synthesizer 声明使用该记忆，但未提供引用理由。",
+                ),
             )
             for memory in used_memories
         ]
@@ -108,18 +119,19 @@ class MemoFluxService:
             answer=str(synthesis.output.get("answer") or "\n".join(memory.content for memory in memories)),
             references=references,
             confidence=_coerce_confidence(synthesis.output.get("confidence")),
-            uncertainties=[],
+            uncertainties=[str(item) for item in synthesis.output.get("uncertainties") or []],
         )
         self.repository.record_query_audit(
-                QueryAuditRecord(
-                    query_id=query_id,
-                    session=session,
+            QueryAuditRecord(
+                query_id=query_id,
+                session=session,
                 original_query=query,
                 query_type=result.query_type,
                 rewritten_queries=[str(item) for item in rewritten_queries],
                 candidate_limit=top_k,
                 retrieved=[_audit_memory_item(memory) for memory in memories],
                 selected_memory_ids=[memory.memory_id for memory in used_memories],
+                selection_reasons=selected_reasons,
                 final_answer=result.answer,
                 status="ok",
                 error_stage=None,
@@ -204,21 +216,39 @@ class MemoFluxService:
 
 
 def _filter_used_memories(memories, used_memory_ids: list[str]) -> list:
-    """按 LLM 声明使用的记忆 ID 过滤候选，非法或缺失时退回全部候选。
+    """按 LLM 声明使用的记忆 ID 严格过滤候选。
 
     Args:
         memories: 候选记忆列表。
         used_memory_ids: LLM 输出的实际引用记忆 ID。
 
     Returns:
-        用于 API references 的记忆列表。
+        用于 API references 的记忆列表。缺失或非法 ID 不退回全部候选。
     """
 
     if not used_memory_ids:
-        return memories
+        return []
     by_id = {memory.memory_id: memory for memory in memories}
-    filtered = [by_id[memory_id] for memory_id in used_memory_ids if memory_id in by_id]
-    return filtered or memories
+    return [by_id[memory_id] for memory_id in used_memory_ids if memory_id in by_id]
+
+
+def _filter_selection_reasons(memories, relevance_by_id: dict) -> dict[str, str]:
+    """过滤 Answer Synthesizer 输出的引用理由，只保留候选记忆 ID。
+
+    Args:
+        memories: 候选记忆列表。
+        relevance_by_id: LLM 输出的 memory_id 到引用理由映射。
+
+    Returns:
+        只包含候选记忆 ID 的引用理由。
+    """
+
+    candidate_ids = {memory.memory_id for memory in memories}
+    return {
+        str(memory_id): str(reason)
+        for memory_id, reason in dict(relevance_by_id or {}).items()
+        if memory_id in candidate_ids
+    }
 
 
 def _audit_memory_item(memory) -> dict:

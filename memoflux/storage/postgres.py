@@ -63,6 +63,7 @@ class QueryAuditRow(Base):
     candidate_limit: Mapped[int] = mapped_column(Integer, nullable=False)
     retrieved: Mapped[list] = mapped_column(JSON, nullable=False)
     selected_memory_ids: Mapped[list] = mapped_column(JSON, nullable=False)
+    selection_reasons: Mapped[dict] = mapped_column(JSON, nullable=False)
     final_answer: Mapped[str | None] = mapped_column(Text, nullable=True)
     status: Mapped[str] = mapped_column(String, nullable=False)
     error_stage: Mapped[str | None] = mapped_column(String, nullable=True)
@@ -288,6 +289,11 @@ class PostgresMemoryRepository:
                     else item
                     for item in row.retrieved
                 ]
+                row.selection_reasons = {
+                    memory_id: reason
+                    for memory_id, reason in dict(row.selection_reasons or {}).items()
+                    if memory_id not in deleted
+                }
                 if selected & deleted:
                     row.final_answer = None
             db_session.commit()
@@ -324,6 +330,7 @@ def _query_audit_from_row(row: QueryAuditRow) -> QueryAuditRecord:
         candidate_limit=row.candidate_limit,
         retrieved=list(row.retrieved or []),
         selected_memory_ids=list(row.selected_memory_ids or []),
+        selection_reasons=dict(row.selection_reasons or {}),
         final_answer=row.final_answer,
         status=row.status,
         error_stage=row.error_stage,

@@ -71,6 +71,23 @@ class SelectiveReferenceLLMClient(FakeLLMClient):
         )
 
 
+class NoEvidenceLLMClient(FakeLLMClient):
+    def synthesize_answer(self, *, query: str, memories: list) -> LLMResult:
+        self.calls.append(("synthesize_answer", query, len(memories)))
+        return LLMResult(
+            output={
+                "answer": "当前 session 中没有足够记忆支持回答该问题。",
+                "confidence": 0.0,
+                "used_memory_ids": [],
+                "relevance_by_id": {},
+                "uncertainties": ["候选记忆未包含问题所需证据"],
+            },
+            input_tokens=20,
+            output_tokens=10,
+            model="fake",
+        )
+
+
 
 class FakeEmbeddingService:
     def __init__(self) -> None:
@@ -326,6 +343,25 @@ def test_recall_references_only_include_used_memory_ids():
     references = response.json()["data"]["references"]
     assert len(references) == 1
     assert references[0]["quote"] == "第一条 Atlas 记忆。"
+    assert references[0]["relevance"] == "只引用第一条记忆。"
+
+
+def test_recall_returns_empty_references_when_llm_uses_no_memories():
+    llm_client = NoEvidenceLLMClient()
+    app = create_app(repository=MemoryRepository(), llm_client=llm_client, embedding_client=FakeEmbeddingService())
+    from fastapi.testclient import TestClient
+
+    client = TestClient(app)
+    client.post("/v1/ingest", json={"session": "s", "content": "Zephyr 延期原因是构建缓存错误。", "occurred_at": "2026-05-01T10:00:00Z"})
+
+    response = client.post("/v1/recall", json={"session": "s", "query": "Atlas 延期原因是什么？"})
+
+    data = response.json()["data"]
+    assert response.status_code == 200
+    assert data["answer"] == "当前 session 中没有足够记忆支持回答该问题。"
+    assert data["references"] == []
+    assert data["confidence"] == 0.0
+    assert data["uncertainties"] == ["候选记忆未包含问题所需证据"]
 
 
 def test_audits_return_persisted_recall_records():
@@ -358,6 +394,23 @@ def test_audits_return_persisted_recall_records():
     assert items[0]["selected_memory_ids"]
     assert items[0]["final_answer"].startswith("LLM 整合答案")
     assert "llm_usage" not in items[0]
+
+
+def test_audits_return_selection_reasons():
+    llm_client = SelectiveReferenceLLMClient()
+    app = create_app(repository=MemoryRepository(), llm_client=llm_client, embedding_client=FakeEmbeddingService())
+    from fastapi.testclient import TestClient
+
+    client = TestClient(app)
+    client.post("/v1/ingest", json={"session": "s", "content": "第一条 Atlas 记忆。", "occurred_at": "2026-05-01T10:00:00Z"})
+    recall_response = client.post("/v1/recall", json={"session": "s", "query": "Atlas?"})
+    query_id = recall_response.json()["data"]["query_id"]
+
+    audits_response = client.get("/v1/audits", params={"session": "s", "query_id": query_id})
+
+    item = audits_response.json()["data"]["items"][0]
+    selected_id = item["selected_memory_ids"][0]
+    assert item["selection_reasons"] == {selected_id: "只引用第一条记忆。"}
 
 
 def test_delete_records_audit_and_scrubs_deleted_content_from_query_audits():

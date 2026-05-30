@@ -142,6 +142,11 @@ class MemoryRepository:
                 candidate_limit=audit.candidate_limit,
                 retrieved=retrieved,
                 selected_memory_ids=audit.selected_memory_ids,
+                selection_reasons={
+                    memory_id: reason
+                    for memory_id, reason in audit.selection_reasons.items()
+                    if memory_id not in deleted
+                },
                 final_answer=final_answer,
                 status=audit.status,
                 error_stage=audit.error_stage,

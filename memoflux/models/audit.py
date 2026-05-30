@@ -16,6 +16,7 @@ class QueryAuditRecord:
     candidate_limit: int
     retrieved: list[dict]
     selected_memory_ids: list[str]
+    selection_reasons: dict[str, str]
     final_answer: str | None
     status: str
     error_stage: str | None
