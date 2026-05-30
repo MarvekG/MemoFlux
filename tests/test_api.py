@@ -299,6 +299,28 @@ def test_delete_records_audit_and_scrubs_deleted_content_from_query_audits():
     assert query_audit["retrieved"][0]["content_preview"] is None
 
 
+def test_audits_are_scope_isolated_and_support_query_id_lookup():
+    llm_client = FakeLLMClient()
+    app = create_app(repository=MemoryRepository(), llm_client=llm_client, embedding_client=FakeEmbeddingService())
+    from fastapi.testclient import TestClient
+
+    client = TestClient(app)
+    client.post("/v1/ingest", json={"scope": "scope:a", "content": "A 项目延期。", "occurred_at": "2026-05-01T10:00:00Z"})
+    client.post("/v1/ingest", json={"scope": "scope:b", "content": "B 项目延期。", "occurred_at": "2026-05-01T10:00:00Z"})
+    query_a = client.post("/v1/recall", json={"scope": "scope:a", "query": "A 为什么延期？"}).json()["data"]["query_id"]
+    client.post("/v1/recall", json={"scope": "scope:b", "query": "B 为什么延期？"})
+
+    scope_a_response = client.get("/v1/audits", params={"scope": "scope:a"})
+    assert [item["scope"] for item in scope_a_response.json()["data"]["items"]] == ["scope:a"]
+
+    detail_response = client.get("/v1/audits", params={"scope": "scope:a", "query_id": query_a})
+    assert len(detail_response.json()["data"]["items"]) == 1
+    assert detail_response.json()["data"]["items"][0]["query_id"] == query_a
+
+    cross_scope_detail = client.get("/v1/audits", params={"scope": "scope:b", "query_id": query_a})
+    assert cross_scope_detail.json()["data"]["items"] == []
+
+
 def test_settings_use_memoflux_embedding_configuration(monkeypatch):
     monkeypatch.setenv("MEMOFLUX_EMBEDDING_PROVIDER", "openai_compatible")
     monkeypatch.setenv("MEMOFLUX_EMBEDDING_MODEL", "text-embedding-3-small")
