@@ -9,7 +9,7 @@ class QueryAuditRecord:
     """召回查询审计记录。"""
 
     query_id: str
-    scope: str
+    session: str
     original_query: str
     query_type: str
     rewritten_queries: list[str]
@@ -28,7 +28,7 @@ class DeleteAuditRecord:
     """删除操作审计记录。"""
 
     delete_id: str
-    scope: str
+    session: str
     target: dict
     dry_run: bool
     matched_memory_ids: list[str]

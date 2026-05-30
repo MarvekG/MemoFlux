@@ -18,7 +18,7 @@ from memoflux.storage.postgres import PostgresMemoryRepository
 class IngestRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    scope: str = Field(..., min_length=1)
+    session: str = Field(..., min_length=1)
     content: str = Field(..., min_length=1)
     occurred_at: datetime
 
@@ -26,7 +26,7 @@ class IngestRequest(BaseModel):
 class RecallRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    scope: str = Field(..., min_length=1)
+    session: str = Field(..., min_length=1)
     query: str = Field(..., min_length=1)
     include_references: bool = True
     top_k: int = Field(default=12, ge=1, le=100)
@@ -35,7 +35,7 @@ class RecallRequest(BaseModel):
 class DeleteRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    scope: str = Field(..., min_length=1)
+    session: str = Field(..., min_length=1)
     memory_ids: list[str] | None = None
     query: str | None = None
     dry_run: bool = True
@@ -67,12 +67,12 @@ def create_app(*, repository=None, llm_client=None, embedding_client=None, datab
 
     @app.post("/v1/ingest")
     def ingest(request: IngestRequest):
-        memory = service.ingest(scope=request.scope, content=request.content, occurred_at=request.occurred_at)
+        memory = service.ingest(session=request.session, content=request.content, occurred_at=request.occurred_at)
         return _ok(_memory_payload(memory, include_content=False))
 
     @app.post("/v1/recall")
     def recall(request: RecallRequest):
-        result = service.recall(scope=request.scope, query=request.query, top_k=request.top_k)
+        result = service.recall(session=request.session, query=request.query, top_k=request.top_k)
         payload = {
             "query_id": result.query_id,
             "query_type": result.query_type,
@@ -87,7 +87,7 @@ def create_app(*, repository=None, llm_client=None, embedding_client=None, datab
     def delete(request: DeleteRequest):
         try:
             result = service.delete(
-                scope=request.scope,
+                session=request.session,
                 memory_ids=request.memory_ids,
                 query=request.query,
                 dry_run=request.dry_run,
@@ -107,12 +107,12 @@ def create_app(*, repository=None, llm_client=None, embedding_client=None, datab
         return _ok({"status": "ok", "db": "ok", "retrieval": "ok", "llm": "local", "retrieval_strategy": "text_time"})
 
     @app.get("/v1/preview")
-    def preview(scope: str, limit: int = 50):
-        return _ok({"items": [_memory_payload(item, include_content=True) for item in service.preview(scope=scope, limit=limit)], "next_cursor": None})
+    def preview(session: str, limit: int = 50):
+        return _ok({"items": [_memory_payload(item, include_content=True) for item in service.preview(session=session, limit=limit)], "next_cursor": None})
 
     @app.get("/v1/audits")
-    def audits(scope: str, query_id: str | None = None, limit: int = 50):
-        items = service.repository.list_audits(scope=scope, query_id=query_id, limit=limit)
+    def audits(session: str, query_id: str | None = None, limit: int = 50):
+        items = service.repository.list_audits(session=session, query_id=query_id, limit=limit)
         return _ok({"items": [_audit_payload(item) for item in items], "next_cursor": None})
 
     @app.get("/v1/usage/stats")
@@ -160,7 +160,7 @@ def _error(code: str, message: str):
 def _memory_payload(memory: MemoryRecord, *, include_content: bool) -> dict[str, Any]:
     payload = {
         "memory_id": memory.memory_id,
-        "scope": memory.scope,
+        "session": memory.session,
         "occurred_at": memory.occurred_at.isoformat(),
         "created_at": memory.created_at.isoformat(),
     }
@@ -185,7 +185,7 @@ def _audit_payload(audit: QueryAuditRecord | DeleteAuditRecord) -> dict[str, Any
         return {
             "audit_type": "query",
             "query_id": audit.query_id,
-            "scope": audit.scope,
+            "session": audit.session,
             "original_query": audit.original_query,
             "query_type": audit.query_type,
             "rewritten_queries": audit.rewritten_queries,
@@ -201,7 +201,7 @@ def _audit_payload(audit: QueryAuditRecord | DeleteAuditRecord) -> dict[str, Any
     return {
         "audit_type": "delete",
         "delete_id": audit.delete_id,
-        "scope": audit.scope,
+        "session": audit.session,
         "target": audit.target,
         "dry_run": audit.dry_run,
         "matched_memory_ids": audit.matched_memory_ids,

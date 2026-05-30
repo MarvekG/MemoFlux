@@ -80,13 +80,13 @@ class VectorAwareMemoryRepository(MemoryRepository):
         self.insert_embeddings = []
         self.search_embeddings = []
 
-    def insert_memory(self, *, scope: str, content: str, occurred_at, embedding=None):
+    def insert_memory(self, *, session: str, content: str, occurred_at, embedding=None):
         self.insert_embeddings.append(embedding)
-        return super().insert_memory(scope=scope, content=content, occurred_at=occurred_at)
+        return super().insert_memory(session=session, content=content, occurred_at=occurred_at)
 
-    def search_memories(self, *, scope: str, terms: set[str], limit: int, query_embedding=None):
+    def search_memories(self, *, session: str, terms: set[str], limit: int, query_embedding=None):
         self.search_embeddings.append(query_embedding)
-        return super().search_memories(scope=scope, terms=terms, limit=limit)
+        return super().search_memories(session=session, terms=terms, limit=limit)
 
 
 def test_ingest_recall_delete_and_preview_flow():
@@ -98,7 +98,7 @@ def test_ingest_recall_delete_and_preview_flow():
     ingest_response = client.post(
         "/v1/ingest",
         json={
-            "scope": "project:atlas",
+            "session": "project:atlas",
             "content": "Atlas 发布延期，因为数据库迁移回滚方案不完整。",
             "occurred_at": "2026-05-01T10:00:00Z",
         },
@@ -108,7 +108,7 @@ def test_ingest_recall_delete_and_preview_flow():
 
     recall_response = client.post(
         "/v1/recall",
-        json={"scope": "project:atlas", "query": "为什么 Atlas 上线被卡住？"},
+        json={"session": "project:atlas", "query": "为什么 Atlas 上线被卡住？"},
     )
     assert recall_response.status_code == 200
     recall_data = recall_response.json()["data"]
@@ -116,27 +116,27 @@ def test_ingest_recall_delete_and_preview_flow():
     assert recall_data["references"][0]["memory_id"] == memory_id
     assert "usage" not in recall_data
 
-    other_scope_response = client.post(
+    other_session_response = client.post(
         "/v1/recall",
-        json={"scope": "project:zephyr", "query": "为什么 Atlas 上线被卡住？"},
+        json={"session": "project:zephyr", "query": "为什么 Atlas 上线被卡住？"},
     )
-    assert other_scope_response.status_code == 200
-    assert other_scope_response.json()["data"]["answer"] == "未找到可用于回答该问题的记忆。"
+    assert other_session_response.status_code == 200
+    assert other_session_response.json()["data"]["answer"] == "未找到可用于回答该问题的记忆。"
 
-    preview_response = client.get("/v1/preview", params={"scope": "project:atlas"})
+    preview_response = client.get("/v1/preview", params={"session": "project:atlas"})
     assert preview_response.status_code == 200
     assert preview_response.json()["data"]["items"][0]["memory_id"] == memory_id
 
     delete_response = client.post(
         "/v1/delete",
-        json={"scope": "project:atlas", "memory_ids": [memory_id], "dry_run": False},
+        json={"session": "project:atlas", "memory_ids": [memory_id], "dry_run": False},
     )
     assert delete_response.status_code == 200
     assert delete_response.json()["data"]["affected_memory_ids"] == [memory_id]
 
     after_delete_response = client.post(
         "/v1/recall",
-        json={"scope": "project:atlas", "query": "为什么 Atlas 上线被卡住？"},
+        json={"session": "project:atlas", "query": "为什么 Atlas 上线被卡住？"},
     )
     assert after_delete_response.status_code == 200
     assert after_delete_response.json()["data"]["references"] == []
@@ -150,7 +150,7 @@ def test_history_recall_orders_candidates_by_occurred_at():
     client.post(
         "/v1/ingest",
         json={
-            "scope": "project:atlas",
+            "session": "project:atlas",
             "content": "5 月 3 日确认需要补充回滚演练记录。",
             "occurred_at": "2026-05-03T09:00:00Z",
         },
@@ -158,7 +158,7 @@ def test_history_recall_orders_candidates_by_occurred_at():
     client.post(
         "/v1/ingest",
         json={
-            "scope": "project:atlas",
+            "session": "project:atlas",
             "content": "5 月 1 日 Atlas 发布延期，因为回滚方案不完整。",
             "occurred_at": "2026-05-01T10:00:00Z",
         },
@@ -166,7 +166,7 @@ def test_history_recall_orders_candidates_by_occurred_at():
 
     response = client.post(
         "/v1/recall",
-        json={"scope": "project:atlas", "query": "Atlas 计划之前是怎么变化的？"},
+        json={"session": "project:atlas", "query": "Atlas 计划之前是怎么变化的？"},
     )
 
     assert response.status_code == 200
@@ -181,11 +181,34 @@ def test_delete_query_mode_requires_dry_run():
     client = TestClient(app)
     response = client.post(
         "/v1/delete",
-        json={"scope": "project:atlas", "query": "删除发布延期细节", "dry_run": False},
+        json={"session": "project:atlas", "query": "删除发布延期细节", "dry_run": False},
     )
 
     assert response.status_code == 400
     assert response.json()["error"]["code"] == "validation_error"
+
+
+def test_ingest_rejects_legacy_scope_field():
+    app = create_app(repository=MemoryRepository(), embedding_client=FakeEmbeddingService())
+    from fastapi.testclient import TestClient
+
+    client = TestClient(app)
+    response = client.post(
+        "/v1/ingest",
+        json={"scope": "legacy", "content": "旧字段应被拒绝。", "occurred_at": "2026-05-01T10:00:00Z"},
+    )
+
+    assert response.status_code == 422
+
+
+def test_recall_requires_session_field():
+    app = create_app(repository=MemoryRepository(), embedding_client=FakeEmbeddingService())
+    from fastapi.testclient import TestClient
+
+    client = TestClient(app)
+    response = client.post("/v1/recall", json={"scope": "legacy", "query": "旧字段能查吗？"})
+
+    assert response.status_code == 422
 
 
 def test_usage_stats_are_aggregate_only():
@@ -195,9 +218,9 @@ def test_usage_stats_are_aggregate_only():
     client = TestClient(app)
     client.post(
         "/v1/ingest",
-        json={"scope": "s", "content": "Atlas 发布延期。", "occurred_at": "2026-05-01T10:00:00Z"},
+        json={"session": "s", "content": "Atlas 发布延期。", "occurred_at": "2026-05-01T10:00:00Z"},
     )
-    client.post("/v1/recall", json={"scope": "s", "query": "Atlas 为什么延期？"})
+    client.post("/v1/recall", json={"session": "s", "query": "Atlas 为什么延期？"})
 
     stats_response = client.get("/v1/usage/stats")
     assert stats_response.status_code == 200
@@ -218,9 +241,9 @@ def test_recall_uses_configured_llm_without_returning_usage():
     client = TestClient(app)
     client.post(
         "/v1/ingest",
-        json={"scope": "s", "content": "Atlas 发布延期，因为数据库迁移回滚方案不完整。", "occurred_at": "2026-05-01T10:00:00Z"},
+        json={"session": "s", "content": "Atlas 发布延期，因为数据库迁移回滚方案不完整。", "occurred_at": "2026-05-01T10:00:00Z"},
     )
-    response = client.post("/v1/recall", json={"scope": "s", "query": "Atlas 为什么延期？"})
+    response = client.post("/v1/recall", json={"session": "s", "query": "Atlas 为什么延期？"})
 
     data = response.json()["data"]
     assert response.status_code == 200
@@ -237,9 +260,9 @@ def test_recall_handles_non_numeric_llm_confidence():
     client = TestClient(app)
     client.post(
         "/v1/ingest",
-        json={"scope": "s", "content": "Atlas 发布延期，因为数据库迁移回滚方案不完整。", "occurred_at": "2026-05-01T10:00:00Z"},
+        json={"session": "s", "content": "Atlas 发布延期，因为数据库迁移回滚方案不完整。", "occurred_at": "2026-05-01T10:00:00Z"},
     )
-    response = client.post("/v1/recall", json={"scope": "s", "query": "Atlas 为什么延期？"})
+    response = client.post("/v1/recall", json={"session": "s", "query": "Atlas 为什么延期？"})
 
     assert response.status_code == 200
     assert response.json()["data"]["confidence"] == 0.6
@@ -270,9 +293,9 @@ def test_ingest_and_recall_use_embeddings_for_vector_retrieval():
     client = TestClient(app)
     client.post(
         "/v1/ingest",
-        json={"scope": "s", "content": "Atlas 发布延期，因为数据库迁移回滚方案不完整。", "occurred_at": "2026-05-01T10:00:00Z"},
+        json={"session": "s", "content": "Atlas 发布延期，因为数据库迁移回滚方案不完整。", "occurred_at": "2026-05-01T10:00:00Z"},
     )
-    response = client.post("/v1/recall", json={"scope": "s", "query": "Atlas 为什么延期？"})
+    response = client.post("/v1/recall", json={"session": "s", "query": "Atlas 为什么延期？"})
 
     assert response.status_code == 200
     assert repository.insert_embeddings == [[0.1, 0.2, 0.3]]
@@ -287,10 +310,10 @@ def test_recall_references_only_include_used_memory_ids():
     from fastapi.testclient import TestClient
 
     client = TestClient(app)
-    client.post("/v1/ingest", json={"scope": "s", "content": "第一条 Atlas 记忆。", "occurred_at": "2026-05-01T10:00:00Z"})
-    client.post("/v1/ingest", json={"scope": "s", "content": "第二条 Atlas 记忆。", "occurred_at": "2026-05-02T10:00:00Z"})
+    client.post("/v1/ingest", json={"session": "s", "content": "第一条 Atlas 记忆。", "occurred_at": "2026-05-01T10:00:00Z"})
+    client.post("/v1/ingest", json={"session": "s", "content": "第二条 Atlas 记忆。", "occurred_at": "2026-05-02T10:00:00Z"})
 
-    response = client.post("/v1/recall", json={"scope": "s", "query": "Atlas?", "top_k": 2})
+    response = client.post("/v1/recall", json={"session": "s", "query": "Atlas?", "top_k": 2})
 
     assert response.status_code == 200
     references = response.json()["data"]["references"]
@@ -307,22 +330,22 @@ def test_audits_return_persisted_recall_records():
     client.post(
         "/v1/ingest",
         json={
-            "scope": "project:atlas",
+            "session": "project:atlas",
             "content": "Atlas 发布延期，因为数据库迁移回滚方案不完整。",
             "occurred_at": "2026-05-01T10:00:00Z",
         },
     )
-    recall_response = client.post("/v1/recall", json={"scope": "project:atlas", "query": "Atlas 为什么延期？"})
+    recall_response = client.post("/v1/recall", json={"session": "project:atlas", "query": "Atlas 为什么延期？"})
     query_id = recall_response.json()["data"]["query_id"]
 
-    audits_response = client.get("/v1/audits", params={"scope": "project:atlas"})
+    audits_response = client.get("/v1/audits", params={"session": "project:atlas"})
 
     assert audits_response.status_code == 200
     items = audits_response.json()["data"]["items"]
     assert len(items) == 1
     assert items[0]["audit_type"] == "query"
     assert items[0]["query_id"] == query_id
-    assert items[0]["scope"] == "project:atlas"
+    assert items[0]["session"] == "project:atlas"
     assert items[0]["original_query"] == "Atlas 为什么延期？"
     assert items[0]["query_type"] == "direct"
     assert items[0]["selected_memory_ids"]
@@ -339,21 +362,21 @@ def test_delete_records_audit_and_scrubs_deleted_content_from_query_audits():
     ingest_response = client.post(
         "/v1/ingest",
         json={
-            "scope": "project:atlas",
+            "session": "project:atlas",
             "content": "Atlas 发布延期，因为数据库迁移回滚方案不完整。",
             "occurred_at": "2026-05-01T10:00:00Z",
         },
     )
     memory_id = ingest_response.json()["data"]["memory_id"]
-    client.post("/v1/recall", json={"scope": "project:atlas", "query": "Atlas 为什么延期？"})
+    client.post("/v1/recall", json={"session": "project:atlas", "query": "Atlas 为什么延期？"})
 
     delete_response = client.post(
         "/v1/delete",
-        json={"scope": "project:atlas", "memory_ids": [memory_id], "dry_run": False},
+        json={"session": "project:atlas", "memory_ids": [memory_id], "dry_run": False},
     )
     delete_id = delete_response.json()["data"]["delete_id"]
 
-    audits_response = client.get("/v1/audits", params={"scope": "project:atlas", "limit": 10})
+    audits_response = client.get("/v1/audits", params={"session": "project:atlas", "limit": 10})
     items = audits_response.json()["data"]["items"]
     delete_audit = next(item for item in items if item["audit_type"] == "delete")
     query_audit = next(item for item in items if item["audit_type"] == "query")
@@ -365,26 +388,26 @@ def test_delete_records_audit_and_scrubs_deleted_content_from_query_audits():
     assert query_audit["retrieved"][0]["content_preview"] is None
 
 
-def test_audits_are_scope_isolated_and_support_query_id_lookup():
+def test_audits_are_session_isolated_and_support_query_id_lookup():
     llm_client = FakeLLMClient()
     app = create_app(repository=MemoryRepository(), llm_client=llm_client, embedding_client=FakeEmbeddingService())
     from fastapi.testclient import TestClient
 
     client = TestClient(app)
-    client.post("/v1/ingest", json={"scope": "scope:a", "content": "A 项目延期。", "occurred_at": "2026-05-01T10:00:00Z"})
-    client.post("/v1/ingest", json={"scope": "scope:b", "content": "B 项目延期。", "occurred_at": "2026-05-01T10:00:00Z"})
-    query_a = client.post("/v1/recall", json={"scope": "scope:a", "query": "A 为什么延期？"}).json()["data"]["query_id"]
-    client.post("/v1/recall", json={"scope": "scope:b", "query": "B 为什么延期？"})
+    client.post("/v1/ingest", json={"session": "session:a", "content": "A 项目延期。", "occurred_at": "2026-05-01T10:00:00Z"})
+    client.post("/v1/ingest", json={"session": "session:b", "content": "B 项目延期。", "occurred_at": "2026-05-01T10:00:00Z"})
+    query_a = client.post("/v1/recall", json={"session": "session:a", "query": "A 为什么延期？"}).json()["data"]["query_id"]
+    client.post("/v1/recall", json={"session": "session:b", "query": "B 为什么延期？"})
 
-    scope_a_response = client.get("/v1/audits", params={"scope": "scope:a"})
-    assert [item["scope"] for item in scope_a_response.json()["data"]["items"]] == ["scope:a"]
+    session_a_response = client.get("/v1/audits", params={"session": "session:a"})
+    assert [item["session"] for item in session_a_response.json()["data"]["items"]] == ["session:a"]
 
-    detail_response = client.get("/v1/audits", params={"scope": "scope:a", "query_id": query_a})
+    detail_response = client.get("/v1/audits", params={"session": "session:a", "query_id": query_a})
     assert len(detail_response.json()["data"]["items"]) == 1
     assert detail_response.json()["data"]["items"][0]["query_id"] == query_a
 
-    cross_scope_detail = client.get("/v1/audits", params={"scope": "scope:b", "query_id": query_a})
-    assert cross_scope_detail.json()["data"]["items"] == []
+    cross_session_detail = client.get("/v1/audits", params={"session": "session:b", "query_id": query_a})
+    assert cross_session_detail.json()["data"]["items"] == []
 
 
 def test_settings_use_memoflux_embedding_configuration(monkeypatch):

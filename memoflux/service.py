@@ -18,11 +18,11 @@ class MemoFluxService:
         self.llm_client = llm_client or LocalLLMClient()
         self.embedding_service = embedding_client or embedding_service
 
-    def ingest(self, *, scope: str, content: str, occurred_at: datetime):
+    def ingest(self, *, session: str, content: str, occurred_at: datetime):
         """写入一条记忆。"""
 
-        if not scope:
-            raise ValueError("scope is required")
+        if not session:
+            raise ValueError("session is required")
         if not content:
             raise ValueError("content is required")
         if occurred_at is None:
@@ -34,17 +34,17 @@ class MemoFluxService:
             output_tokens=embedding.output_tokens,
         )
         return self.repository.insert_memory(
-            scope=scope,
+            session=session,
             content=content,
             occurred_at=occurred_at,
             embedding=embedding.output.get("embedding"),
         )
 
-    def recall(self, *, scope: str, query: str, top_k: int = 12) -> RecallResult:
-        """召回同一 scope 内的候选记忆并生成答案。"""
+    def recall(self, *, session: str, query: str, top_k: int = 12) -> RecallResult:
+        """召回同一 session 内的候选记忆并生成答案。"""
 
-        if not scope:
-            raise ValueError("scope is required")
+        if not session:
+            raise ValueError("session is required")
         if not query:
             raise ValueError("query is required")
         query_id = uuid4().hex
@@ -57,7 +57,7 @@ class MemoFluxService:
             output_tokens=query_embedding.output_tokens,
         )
         memories = self.repository.search_memories(
-            scope=scope,
+            session=session,
             terms=set(),
             limit=top_k,
             query_embedding=query_embedding.output.get("embedding"),
@@ -71,7 +71,7 @@ class MemoFluxService:
             self.repository.record_query_audit(
                 QueryAuditRecord(
                     query_id=query_id,
-                    scope=scope,
+                    session=session,
                     original_query=query,
                     query_type="direct",
                     rewritten_queries=[str(item) for item in rewritten_queries],
@@ -111,9 +111,9 @@ class MemoFluxService:
             uncertainties=[],
         )
         self.repository.record_query_audit(
-            QueryAuditRecord(
-                query_id=query_id,
-                scope=scope,
+                QueryAuditRecord(
+                    query_id=query_id,
+                    session=session,
                 original_query=query,
                 query_type=result.query_type,
                 rewritten_queries=[str(item) for item in rewritten_queries],
@@ -129,11 +129,11 @@ class MemoFluxService:
         )
         return result
 
-    def delete(self, *, scope: str, memory_ids: list[str] | None, query: str | None, dry_run: bool) -> DeleteResult:
+    def delete(self, *, session: str, memory_ids: list[str] | None, query: str | None, dry_run: bool) -> DeleteResult:
         """删除记忆；query 模式只允许 dry-run。"""
 
-        if not scope:
-            raise ValueError("scope is required")
+        if not session:
+            raise ValueError("session is required")
         if query and not dry_run:
             raise ValueError("query delete requires dry_run=true")
         if not memory_ids and not query:
@@ -147,7 +147,7 @@ class MemoFluxService:
                 output_tokens=query_embedding.output_tokens,
             )
             candidates = self.repository.search_memories(
-                scope=scope,
+                session=session,
                 terms=set(),
                 limit=12,
                 query_embedding=query_embedding.output.get("embedding"),
@@ -157,7 +157,7 @@ class MemoFluxService:
             self.repository.record_delete_audit(
                 DeleteAuditRecord(
                     delete_id=delete_id,
-                    scope=scope,
+                    session=session,
                     target={"query": query},
                     dry_run=True,
                     matched_memory_ids=matched,
@@ -169,12 +169,12 @@ class MemoFluxService:
                 )
             )
             return DeleteResult(delete_id=delete_id, matched_memory_ids=matched, affected_memory_ids=[], status="ok")
-        matched = self.repository.delete_memories(scope=scope, memory_ids=memory_ids or [])
-        self.repository.scrub_deleted_memory_from_audits(scope=scope, memory_ids=matched)
+        matched = self.repository.delete_memories(session=session, memory_ids=memory_ids or [])
+        self.repository.scrub_deleted_memory_from_audits(session=session, memory_ids=matched)
         self.repository.record_delete_audit(
             DeleteAuditRecord(
                 delete_id=delete_id,
-                scope=scope,
+                session=session,
                 target={"memory_ids": memory_ids or []},
                 dry_run=dry_run,
                 matched_memory_ids=matched,
@@ -187,10 +187,10 @@ class MemoFluxService:
         )
         return DeleteResult(delete_id=delete_id, matched_memory_ids=matched, affected_memory_ids=matched, status="ok")
 
-    def preview(self, *, scope: str, limit: int = 50):
-        """预览同一 scope 内的原始记忆。"""
+    def preview(self, *, session: str, limit: int = 50):
+        """预览同一 session 内的原始记忆。"""
 
-        return self.repository.list_memories(scope=scope, limit=limit)
+        return self.repository.list_memories(session=session, limit=limit)
 
     def usage_stats(self):
         """返回聚合用量统计。"""

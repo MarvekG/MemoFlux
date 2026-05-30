@@ -9,7 +9,7 @@ class MemoryRecord:
     """原始记忆记录。"""
 
     memory_id: str
-    scope: str
+    session: str
     content: str
     occurred_at: datetime
     created_at: datetime

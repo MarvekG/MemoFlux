@@ -15,12 +15,12 @@ class MemoryRepository:
         self._query_audits: dict[str, QueryAuditRecord] = {}
         self._delete_audits: dict[str, DeleteAuditRecord] = {}
 
-    def insert_memory(self, *, scope: str, content: str, occurred_at: datetime, embedding=None) -> MemoryRecord:
+    def insert_memory(self, *, session: str, content: str, occurred_at: datetime, embedding=None) -> MemoryRecord:
         """写入一条记忆。"""
 
         memory = MemoryRecord(
             memory_id=uuid4().hex,
-            scope=scope,
+            session=session,
             content=content,
             occurred_at=occurred_at,
             created_at=datetime.now(tz=UTC),
@@ -28,29 +28,29 @@ class MemoryRepository:
         self._memories[memory.memory_id] = memory
         return memory
 
-    def search_memories(self, *, scope: str, terms: set[str], limit: int, query_embedding=None) -> list[MemoryRecord]:
-        """按 scope 和文本词召回候选。"""
+    def search_memories(self, *, session: str, terms: set[str], limit: int, query_embedding=None) -> list[MemoryRecord]:
+        """按 session 召回候选。"""
 
-        memories = [memory for memory in self._memories.values() if memory.scope == scope]
+        memories = [memory for memory in self._memories.values() if memory.session == session]
         memories.sort(key=lambda memory: memory.occurred_at)
         return memories[:limit]
 
-    def delete_memories(self, *, scope: str, memory_ids: list[str]) -> list[str]:
-        """硬删除同一 scope 内的记忆。"""
+    def delete_memories(self, *, session: str, memory_ids: list[str]) -> list[str]:
+        """硬删除同一 session 内的记忆。"""
 
         matched = [
             memory_id
             for memory_id in memory_ids
-            if memory_id in self._memories and self._memories[memory_id].scope == scope
+            if memory_id in self._memories and self._memories[memory_id].session == session
         ]
         for memory_id in matched:
             del self._memories[memory_id]
         return matched
 
-    def list_memories(self, *, scope: str, limit: int) -> list[MemoryRecord]:
-        """列出同一 scope 内的原始记忆。"""
+    def list_memories(self, *, session: str, limit: int) -> list[MemoryRecord]:
+        """列出同一 session 内的原始记忆。"""
 
-        memories = [memory for memory in self._memories.values() if memory.scope == scope]
+        memories = [memory for memory in self._memories.values() if memory.session == session]
         memories.sort(key=lambda memory: memory.occurred_at)
         return memories[:limit]
 
@@ -103,28 +103,28 @@ class MemoryRepository:
     def list_audits(
         self,
         *,
-        scope: str,
+        session: str,
         limit: int,
         query_id: str | None = None,
     ) -> list[QueryAuditRecord | DeleteAuditRecord]:
-        """列出同一 scope 内的查询和删除审计。"""
+        """列出同一 session 内的查询和删除审计。"""
 
         if query_id:
             audit = self._query_audits.get(query_id)
-            return [audit] if audit and audit.scope == scope else []
+            return [audit] if audit and audit.session == session else []
         audits: list[QueryAuditRecord | DeleteAuditRecord] = [
-            audit for audit in self._query_audits.values() if audit.scope == scope
+            audit for audit in self._query_audits.values() if audit.session == session
         ]
-        audits.extend(audit for audit in self._delete_audits.values() if audit.scope == scope)
+        audits.extend(audit for audit in self._delete_audits.values() if audit.session == session)
         audits.sort(key=lambda audit: audit.created_at, reverse=True)
         return audits[:limit]
 
-    def scrub_deleted_memory_from_audits(self, *, scope: str, memory_ids: list[str]) -> None:
+    def scrub_deleted_memory_from_audits(self, *, session: str, memory_ids: list[str]) -> None:
         """从审计记录中清理已硬删除记忆的原文片段。"""
 
         deleted = set(memory_ids)
         for query_id, audit in list(self._query_audits.items()):
-            if audit.scope != scope:
+            if audit.session != session:
                 continue
             retrieved = [
                 {**item, "content_preview": None}
@@ -135,7 +135,7 @@ class MemoryRepository:
             final_answer = None if any(memory_id in audit.selected_memory_ids for memory_id in deleted) else audit.final_answer
             self._query_audits[query_id] = QueryAuditRecord(
                 query_id=audit.query_id,
-                scope=audit.scope,
+                session=audit.session,
                 original_query=audit.original_query,
                 query_type=audit.query_type,
                 rewritten_queries=audit.rewritten_queries,
