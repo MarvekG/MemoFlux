@@ -943,7 +943,24 @@ Mock LLM 测试：
 - 查询审计记录 planner、candidate retrieval、answer、usage 和 timing 详情。
 - `DELETE /v1/usage/stats` 只清空 usage 统计，不删除 memory 或 audit。
 
-## 14. 待定决策
+## 14. 相似记忆评估发现
+
+使用 100 条同一 `scope` 内的相似发布/延期记忆进行 smoke 评估后，当前召回链路暴露出以下问题：
+
+- pgvector `top_k` 在同一 `scope` 内混放多个项目时，会召回语义相似但主题不同的候选。例如查询 Atlas 时，候选中可能混入 Zephyr、Orion 或 Nova 的延期记录。
+- 最终答案通常比候选更干净，因为 Answer Synthesizer 能过滤部分无关候选；但 API `references` 当前如果直接返回候选集合，会把无关候选暴露给调用方。
+- `references` 不应等同于 retrieved candidates。`retrieved` 是排障用候选集合，应保存在 audit；API `references` 应只包含最终答案实际使用的记忆。
+- Query Planner 生成的 `rewritten_queries` 当前主要用于审计。后续如果要提升召回，应对 rewritten queries 做多路 embedding 检索、合并和去重。
+- LLM 结构化输出必须包含 `used_memory_ids`，表示最终答案实际引用的候选记忆 ID。服务层必须过滤掉不在候选集合中的 ID。
+- LLM 结构化输出中的 `confidence` 必须是 `0.0` 到 `1.0` 的数字。字符串值如 `"high"` 不合规，服务层应降级为默认置信度并通过 audit 暴露输出不合规事实。
+
+因此，`POST /v1/recall` 的响应语义调整为：
+
+- `references`：只返回 Answer Synthesizer 声明使用的 `used_memory_ids` 对应记忆。
+- `audits[].retrieved`：保留完整候选集合，用于诊断召回噪声。
+- `audits[].selected_memory_ids`：记录 `used_memory_ids` 过滤后的有效引用 ID。
+
+## 15. 待定决策
 
 - 是否在 pgvector 之外引入更复杂的 hybrid retrieval 编排。第一版先保持 SQLAlchemy + pgvector + 文本/时间兜底。
 - 是否引入 LlamaIndex。第一版不引入；只有需要多向量后端或复杂 retriever 编排时再评估。
