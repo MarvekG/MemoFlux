@@ -4,7 +4,6 @@ from datetime import UTC, datetime
 from uuid import uuid4
 
 from memoflux.models import DeleteAuditRecord, MemoryRecord, QueryAuditRecord, UsageStats
-from memoflux.retrieval import score_content
 
 
 class MemoryRepository:
@@ -32,14 +31,9 @@ class MemoryRepository:
     def search_memories(self, *, scope: str, terms: set[str], limit: int, query_embedding=None) -> list[MemoryRecord]:
         """按 scope 和文本词召回候选。"""
 
-        scored = [
-            (score_content(memory.content, terms), memory)
-            for memory in self._memories.values()
-            if memory.scope == scope
-        ]
-        matches = [item for item in scored if item[0] > 0]
-        matches.sort(key=lambda item: (-item[0], item[1].occurred_at))
-        return [memory for _, memory in matches[:limit]]
+        memories = [memory for memory in self._memories.values() if memory.scope == scope]
+        memories.sort(key=lambda memory: memory.occurred_at)
+        return memories[:limit]
 
     def delete_memories(self, *, scope: str, memory_ids: list[str]) -> list[str]:
         """硬删除同一 scope 内的记忆。"""

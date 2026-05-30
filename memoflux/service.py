@@ -5,7 +5,6 @@ from uuid import uuid4
 
 from memoflux.llm import LLMResult, LocalLLMClient
 from memoflux.models import DeleteAuditRecord, DeleteResult, QueryAuditRecord, RecallReference, RecallResult
-from memoflux.retrieval import build_terms, is_history_query
 from memoflux.services.embedding_service import embedding_service
 
 NO_ANSWER = "未找到可用于回答该问题的记忆。"
@@ -51,9 +50,6 @@ class MemoFluxService:
         query_id = uuid4().hex
         plan = self.llm_client.plan_query(query=query)
         rewritten_queries = plan.output.get("rewritten_queries") or [query]
-        terms = set()
-        for rewritten_query in rewritten_queries:
-            terms.update(build_terms(str(rewritten_query)))
         query_embedding = LLMResult(output={"embedding": self.embedding_service.embed_text(query)})
         self.repository.record_usage(
             operation="embedding:recall",
@@ -62,11 +58,12 @@ class MemoFluxService:
         )
         memories = self.repository.search_memories(
             scope=scope,
-            terms=terms,
+            terms=set(),
             limit=top_k,
             query_embedding=query_embedding.output.get("embedding"),
         )
-        if is_history_query(query):
+        query_type = str(plan.output.get("query_type") or "direct")
+        if query_type in {"history", "temporal", "temporal_summary"}:
             memories.sort(key=lambda memory: memory.occurred_at)
         self.repository.record_usage(operation="query_planner", input_tokens=plan.input_tokens, output_tokens=plan.output_tokens)
         if not memories:
@@ -106,7 +103,7 @@ class MemoFluxService:
         ]
         result = RecallResult(
             query_id=query_id,
-            query_type=str(plan.output.get("query_type") or ("history" if is_history_query(query) else "direct")),
+            query_type=query_type,
             answer=str(synthesis.output.get("answer") or "\n".join(memory.content for memory in memories)),
             references=references,
             confidence=_coerce_confidence(synthesis.output.get("confidence")),
@@ -142,7 +139,18 @@ class MemoFluxService:
             raise ValueError("memory_ids or query is required")
         delete_id = uuid4().hex
         if query:
-            candidates = self.repository.search_memories(scope=scope, terms=build_terms(query), limit=12)
+            query_embedding = LLMResult(output={"embedding": self.embedding_service.embed_text(query)})
+            self.repository.record_usage(
+                operation="embedding:delete_dry_run",
+                input_tokens=query_embedding.input_tokens,
+                output_tokens=query_embedding.output_tokens,
+            )
+            candidates = self.repository.search_memories(
+                scope=scope,
+                terms=set(),
+                limit=12,
+                query_embedding=query_embedding.output.get("embedding"),
+            )
             matched = [memory.memory_id for memory in candidates]
             self.repository.record_usage(operation="delete_dry_run", input_tokens=_estimate_tokens(query), output_tokens=0)
             self.repository.record_delete_audit(
