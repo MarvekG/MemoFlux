@@ -278,8 +278,8 @@ class PostgresMemoryRepository:
         if not memory_ids:
             return
         deleted = set(memory_ids)
-        with Session(self.engine) as session:
-            rows = list(session.scalars(select(QueryAuditRow).where(QueryAuditRow.session == session)).all())
+        with Session(self.engine) as db_session:
+            rows = list(db_session.scalars(select(QueryAuditRow).where(QueryAuditRow.session == session)).all())
             for row in rows:
                 selected = set(row.selected_memory_ids or [])
                 row.retrieved = [
@@ -290,7 +290,7 @@ class PostgresMemoryRepository:
                 ]
                 if selected & deleted:
                     row.final_answer = None
-            session.commit()
+            db_session.commit()
 
 
 def _memory_from_row(row: MemoryRow) -> MemoryRecord:

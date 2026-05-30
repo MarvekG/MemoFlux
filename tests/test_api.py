@@ -472,3 +472,38 @@ def test_answer_synthesis_output_accepts_used_memory_ids():
     assert output.confidence == 0.8
     assert output.used_memory_ids == ["m1"]
     assert output.uncertainties == ["u"]
+
+
+def test_postgres_scrub_uses_session_value_in_query(monkeypatch):
+    from memoflux.storage import postgres
+
+    captured = {}
+
+    class FakeScalarResult:
+        def all(self):
+            return []
+
+    class FakeDbSession:
+        def __init__(self, engine):
+            self.engine = engine
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def scalars(self, statement):
+            captured.update(statement.compile().params)
+            return FakeScalarResult()
+
+        def commit(self):
+            return None
+
+    repository = postgres.PostgresMemoryRepository.__new__(postgres.PostgresMemoryRepository)
+    repository.engine = object()
+    monkeypatch.setattr(postgres, "Session", FakeDbSession)
+
+    repository.scrub_deleted_memory_from_audits(session="session:test", memory_ids=["m1"])
+
+    assert captured == {"session_1": "session:test"}
