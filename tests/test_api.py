@@ -264,6 +264,41 @@ def test_audits_return_persisted_recall_records():
     assert "llm_usage" not in items[0]
 
 
+def test_delete_records_audit_and_scrubs_deleted_content_from_query_audits():
+    llm_client = FakeLLMClient()
+    app = create_app(repository=MemoryRepository(), llm_client=llm_client, embedding_client=FakeEmbeddingService())
+    from fastapi.testclient import TestClient
+
+    client = TestClient(app)
+    ingest_response = client.post(
+        "/v1/ingest",
+        json={
+            "scope": "project:atlas",
+            "content": "Atlas 发布延期，因为数据库迁移回滚方案不完整。",
+            "occurred_at": "2026-05-01T10:00:00Z",
+        },
+    )
+    memory_id = ingest_response.json()["data"]["memory_id"]
+    client.post("/v1/recall", json={"scope": "project:atlas", "query": "Atlas 为什么延期？"})
+
+    delete_response = client.post(
+        "/v1/delete",
+        json={"scope": "project:atlas", "memory_ids": [memory_id], "dry_run": False},
+    )
+    delete_id = delete_response.json()["data"]["delete_id"]
+
+    audits_response = client.get("/v1/audits", params={"scope": "project:atlas", "limit": 10})
+    items = audits_response.json()["data"]["items"]
+    delete_audit = next(item for item in items if item["audit_type"] == "delete")
+    query_audit = next(item for item in items if item["audit_type"] == "query")
+
+    assert delete_audit["delete_id"] == delete_id
+    assert delete_audit["target"] == {"memory_ids": [memory_id]}
+    assert delete_audit["affected_memory_ids"] == [memory_id]
+    assert query_audit["final_answer"] is None
+    assert query_audit["retrieved"][0]["content_preview"] is None
+
+
 def test_settings_use_memoflux_embedding_configuration(monkeypatch):
     monkeypatch.setenv("MEMOFLUX_EMBEDDING_PROVIDER", "openai_compatible")
     monkeypatch.setenv("MEMOFLUX_EMBEDDING_MODEL", "text-embedding-3-small")

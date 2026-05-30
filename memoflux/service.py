@@ -140,13 +140,43 @@ class MemoFluxService:
             raise ValueError("query delete requires dry_run=true")
         if not memory_ids and not query:
             raise ValueError("memory_ids or query is required")
+        delete_id = uuid4().hex
         if query:
             candidates = self.repository.search_memories(scope=scope, terms=build_terms(query), limit=12)
             matched = [memory.memory_id for memory in candidates]
             self.repository.record_usage(operation="delete_dry_run", input_tokens=_estimate_tokens(query), output_tokens=0)
-            return DeleteResult(delete_id=uuid4().hex, matched_memory_ids=matched, affected_memory_ids=[], status="ok")
+            self.repository.record_delete_audit(
+                DeleteAuditRecord(
+                    delete_id=delete_id,
+                    scope=scope,
+                    target={"query": query},
+                    dry_run=True,
+                    matched_memory_ids=matched,
+                    affected_memory_ids=[],
+                    status="ok",
+                    error_code=None,
+                    error_message=None,
+                    created_at=_now_utc(),
+                )
+            )
+            return DeleteResult(delete_id=delete_id, matched_memory_ids=matched, affected_memory_ids=[], status="ok")
         matched = self.repository.delete_memories(scope=scope, memory_ids=memory_ids or [])
-        return DeleteResult(delete_id=uuid4().hex, matched_memory_ids=matched, affected_memory_ids=matched, status="ok")
+        self.repository.scrub_deleted_memory_from_audits(scope=scope, memory_ids=matched)
+        self.repository.record_delete_audit(
+            DeleteAuditRecord(
+                delete_id=delete_id,
+                scope=scope,
+                target={"memory_ids": memory_ids or []},
+                dry_run=dry_run,
+                matched_memory_ids=matched,
+                affected_memory_ids=matched,
+                status="ok",
+                error_code=None,
+                error_message=None,
+                created_at=_now_utc(),
+            )
+        )
+        return DeleteResult(delete_id=delete_id, matched_memory_ids=matched, affected_memory_ids=matched, status="ok")
 
     def preview(self, *, scope: str, limit: int = 50):
         """预览同一 scope 内的原始记忆。"""
