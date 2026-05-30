@@ -50,18 +50,24 @@ class MemoFluxService:
         query_id = uuid4().hex
         plan = self.llm_client.plan_query(query=query)
         rewritten_queries = plan.output.get("rewritten_queries") or [query]
-        query_embedding = LLMResult(output={"embedding": self.embedding_service.embed_text(query)})
-        self.repository.record_usage(
-            operation="embedding:recall",
-            input_tokens=query_embedding.input_tokens,
-            output_tokens=query_embedding.output_tokens,
-        )
-        memories = self.repository.search_memories(
-            session=session,
-            terms=set(),
-            limit=top_k,
-            query_embedding=query_embedding.output.get("embedding"),
-        )
+        retrieval_queries = _build_retrieval_queries(query, rewritten_queries)
+        memory_batches = []
+        for retrieval_query in retrieval_queries:
+            query_embedding = LLMResult(output={"embedding": self.embedding_service.embed_text(retrieval_query)})
+            self.repository.record_usage(
+                operation="embedding:recall",
+                input_tokens=query_embedding.input_tokens,
+                output_tokens=query_embedding.output_tokens,
+            )
+            memory_batches.append(
+                self.repository.search_memories(
+                    session=session,
+                    terms=set(),
+                    limit=top_k,
+                    query_embedding=query_embedding.output.get("embedding"),
+                )
+            )
+        memories = _merge_memories_by_id(memory_batches, limit=top_k)
         query_type = str(plan.output.get("query_type") or "direct")
         if query_type in {"history", "temporal", "temporal_summary"}:
             memories.sort(key=lambda memory: memory.occurred_at)
@@ -249,6 +255,52 @@ def _filter_selection_reasons(memories, relevance_by_id: dict) -> dict[str, str]
         for memory_id, reason in dict(relevance_by_id or {}).items()
         if memory_id in candidate_ids
     }
+
+
+def _build_retrieval_queries(query: str, rewritten_queries: list) -> list[str]:
+    """构建去重后的检索 query 列表。
+
+    Args:
+        query: 原始查询。
+        rewritten_queries: Query Planner 输出的改写查询。
+
+    Returns:
+        原始查询优先、去重保序的检索 query 列表。
+    """
+
+    queries: list[str] = []
+    seen: set[str] = set()
+    for item in [query, *rewritten_queries]:
+        text = str(item or "").strip()
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        queries.append(text)
+    return queries
+
+
+def _merge_memories_by_id(memory_batches: list[list], *, limit: int) -> list:
+    """按 memory_id 合并多路召回结果并保留首次出现顺序。
+
+    Args:
+        memory_batches: 多路检索返回的候选记忆列表。
+        limit: 合并后的最大候选数。
+
+    Returns:
+        去重并截断后的候选记忆。
+    """
+
+    merged = []
+    seen: set[str] = set()
+    for memories in memory_batches:
+        for memory in memories:
+            if memory.memory_id in seen:
+                continue
+            seen.add(memory.memory_id)
+            merged.append(memory)
+            if len(merged) >= limit:
+                return merged
+    return merged
 
 
 def _audit_memory_item(memory) -> dict:

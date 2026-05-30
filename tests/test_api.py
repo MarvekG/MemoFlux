@@ -88,6 +88,17 @@ class NoEvidenceLLMClient(FakeLLMClient):
         )
 
 
+class RewrittenQueryLLMClient(FakeLLMClient):
+    def plan_query(self, *, query: str) -> LLMResult:
+        self.calls.append(("plan_query", query))
+        return LLMResult(
+            output={"query_type": "direct", "rewritten_queries": ["Atlas 延期原因", "Atlas 数据库回滚风险"]},
+            input_tokens=10,
+            output_tokens=5,
+            model="fake",
+        )
+
+
 
 class FakeEmbeddingService:
     def __init__(self) -> None:
@@ -326,6 +337,28 @@ def test_ingest_and_recall_use_embeddings_for_vector_retrieval():
     assert repository.search_embeddings == [[0.1, 0.2, 0.3]]
     assert fake_embedding_service.calls == ["Atlas 发布延期，因为数据库迁移回滚方案不完整。", "Atlas 为什么延期？"]
     assert [call[0] for call in llm_client.calls] == ["plan_query", "synthesize_answer"]
+
+
+def test_recall_searches_original_and_rewritten_queries():
+    llm_client = RewrittenQueryLLMClient()
+    fake_embedding_service = FakeEmbeddingService()
+    repository = VectorAwareMemoryRepository()
+    app = create_app(repository=repository, llm_client=llm_client, embedding_client=fake_embedding_service)
+    from fastapi.testclient import TestClient
+
+    client = TestClient(app)
+    client.post("/v1/ingest", json={"session": "s", "content": "Atlas 延期原因是数据库回滚风险。", "occurred_at": "2026-05-01T10:00:00Z"})
+
+    response = client.post("/v1/recall", json={"session": "s", "query": "Atlas 为什么延期？", "top_k": 3})
+
+    assert response.status_code == 200
+    assert fake_embedding_service.calls == [
+        "Atlas 延期原因是数据库回滚风险。",
+        "Atlas 为什么延期？",
+        "Atlas 延期原因",
+        "Atlas 数据库回滚风险",
+    ]
+    assert repository.search_embeddings == [[0.1, 0.2, 0.3], [0.1, 0.2, 0.3], [0.1, 0.2, 0.3]]
 
 
 def test_recall_references_only_include_used_memory_ids():
