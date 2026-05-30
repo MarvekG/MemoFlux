@@ -109,7 +109,7 @@ class MemoFluxService:
             query_type=str(plan.output.get("query_type") or ("history" if is_history_query(query) else "direct")),
             answer=str(synthesis.output.get("answer") or "\n".join(memory.content for memory in memories)),
             references=references,
-            confidence=float(synthesis.output.get("confidence") or 0.6),
+            confidence=_coerce_confidence(synthesis.output.get("confidence")),
             uncertainties=[],
         )
         self.repository.record_query_audit(
@@ -208,6 +208,22 @@ def _now_utc() -> datetime:
     """返回当前 UTC 时间。"""
 
     return datetime.now(tz=UTC)
+
+
+def _coerce_confidence(value) -> float:
+    """将 LLM 返回的置信度转换为浮点数，非法值降级为默认置信度。
+
+    Args:
+        value: LLM 结构化输出中的置信度字段。
+
+    Returns:
+        可用于 API 响应的浮点置信度。
+    """
+
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return 0.6
 
 
 def _estimate_tokens(text: str) -> int:

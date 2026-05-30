@@ -31,6 +31,17 @@ class FakeLLMClient:
         return LLMResult(output={"prompt_key": prompt_key, "payload": payload}, input_tokens=3, output_tokens=4, model="fake")
 
 
+class StringConfidenceLLMClient(FakeLLMClient):
+    def synthesize_answer(self, *, query: str, memories: list) -> LLMResult:
+        self.calls.append(("synthesize_answer", query, len(memories)))
+        return LLMResult(
+            output={"answer": "字符串置信度答案", "confidence": "high"},
+            input_tokens=20,
+            output_tokens=10,
+            model="fake",
+        )
+
+
 
 class FakeEmbeddingService:
     def __init__(self) -> None:
@@ -194,6 +205,22 @@ def test_recall_uses_configured_llm_without_returning_usage():
     assert data["answer"].startswith("LLM 整合答案")
     assert "usage" not in data
     assert [call[0] for call in llm_client.calls] == ["plan_query", "synthesize_answer"]
+
+
+def test_recall_handles_non_numeric_llm_confidence():
+    llm_client = StringConfidenceLLMClient()
+    app = create_app(repository=MemoryRepository(), llm_client=llm_client, embedding_client=FakeEmbeddingService())
+    from fastapi.testclient import TestClient
+
+    client = TestClient(app)
+    client.post(
+        "/v1/ingest",
+        json={"scope": "s", "content": "Atlas 发布延期，因为数据库迁移回滚方案不完整。", "occurred_at": "2026-05-01T10:00:00Z"},
+    )
+    response = client.post("/v1/recall", json={"scope": "s", "query": "Atlas 为什么延期？"})
+
+    assert response.status_code == 200
+    assert response.json()["data"]["confidence"] == 0.6
 
 
 def test_prompt_eval_uses_configured_llm_without_returning_usage():
