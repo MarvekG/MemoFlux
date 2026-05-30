@@ -3,13 +3,13 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from uuid import uuid4
 
-from sqlalchemy import DateTime, Index, Integer, MetaData, String, Text, create_engine, delete, func, or_, select, text
+from sqlalchemy import DateTime, Index, Integer, JSON, MetaData, String, Text, create_engine, delete, func, or_, select, text
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column
 from sqlalchemy.schema import CreateSchema
 from pgvector.sqlalchemy import Vector
 
-from memoflux.models import MemoryRecord, UsageStats
+from memoflux.models import DeleteAuditRecord, MemoryRecord, QueryAuditRecord, UsageStats
 
 
 class Base(DeclarativeBase):
@@ -46,6 +46,45 @@ class UsageRunRow(Base):
     operation: Mapped[str] = mapped_column(String, nullable=False)
     input_tokens: Mapped[int] = mapped_column(Integer, nullable=False)
     output_tokens: Mapped[int] = mapped_column(Integer, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class QueryAuditRow(Base):
+    """召回查询审计 ORM 映射。"""
+
+    __tablename__ = "memory_query_audits"
+    __table_args__ = (Index("ix_memoflux_query_audits_scope_created_at", "scope", "created_at"),)
+
+    query_id: Mapped[str] = mapped_column(String, primary_key=True)
+    scope: Mapped[str] = mapped_column(String, nullable=False)
+    original_query: Mapped[str] = mapped_column(Text, nullable=False)
+    query_type: Mapped[str] = mapped_column(String, nullable=False)
+    rewritten_queries: Mapped[list] = mapped_column(JSON, nullable=False)
+    candidate_limit: Mapped[int] = mapped_column(Integer, nullable=False)
+    retrieved: Mapped[list] = mapped_column(JSON, nullable=False)
+    selected_memory_ids: Mapped[list] = mapped_column(JSON, nullable=False)
+    final_answer: Mapped[str | None] = mapped_column(Text, nullable=True)
+    status: Mapped[str] = mapped_column(String, nullable=False)
+    error_stage: Mapped[str | None] = mapped_column(String, nullable=True)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class DeleteAuditRow(Base):
+    """删除操作审计 ORM 映射。"""
+
+    __tablename__ = "memory_delete_audits"
+    __table_args__ = (Index("ix_memoflux_delete_audits_scope_created_at", "scope", "created_at"),)
+
+    delete_id: Mapped[str] = mapped_column(String, primary_key=True)
+    scope: Mapped[str] = mapped_column(String, nullable=False)
+    target: Mapped[dict] = mapped_column(JSON, nullable=False)
+    dry_run: Mapped[int] = mapped_column(Integer, nullable=False)
+    matched_memory_ids: Mapped[list] = mapped_column(JSON, nullable=False)
+    affected_memory_ids: Mapped[list] = mapped_column(JSON, nullable=False)
+    status: Mapped[str] = mapped_column(String, nullable=False)
+    error_code: Mapped[str | None] = mapped_column(String, nullable=True)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 
@@ -183,6 +222,76 @@ class PostgresMemoryRepository:
             session.commit()
         return int(result.rowcount or 0)
 
+    def record_query_audit(self, audit: QueryAuditRecord) -> None:
+        """记录召回查询审计。"""
+
+        row = QueryAuditRow(**audit.__dict__)
+        with Session(self.engine) as session:
+            session.add(row)
+            session.commit()
+
+    def record_delete_audit(self, audit: DeleteAuditRecord) -> None:
+        """记录删除操作审计。"""
+
+        row = DeleteAuditRow(**{**audit.__dict__, "dry_run": int(audit.dry_run)})
+        with Session(self.engine) as session:
+            session.add(row)
+            session.commit()
+
+    def list_audits(
+        self,
+        *,
+        scope: str,
+        limit: int,
+        query_id: str | None = None,
+    ) -> list[QueryAuditRecord | DeleteAuditRecord]:
+        """列出同一 scope 内的查询和删除审计。"""
+
+        with Session(self.engine) as session:
+            if query_id:
+                row = session.get(QueryAuditRow, query_id)
+                return [_query_audit_from_row(row)] if row and row.scope == scope else []
+            query_rows = list(
+                session.scalars(
+                    select(QueryAuditRow)
+                    .where(QueryAuditRow.scope == scope)
+                    .order_by(QueryAuditRow.created_at.desc())
+                    .limit(limit)
+                ).all()
+            )
+            delete_rows = list(
+                session.scalars(
+                    select(DeleteAuditRow)
+                    .where(DeleteAuditRow.scope == scope)
+                    .order_by(DeleteAuditRow.created_at.desc())
+                    .limit(limit)
+                ).all()
+            )
+        audits: list[QueryAuditRecord | DeleteAuditRecord] = [_query_audit_from_row(row) for row in query_rows]
+        audits.extend(_delete_audit_from_row(row) for row in delete_rows)
+        audits.sort(key=lambda audit: audit.created_at, reverse=True)
+        return audits[:limit]
+
+    def scrub_deleted_memory_from_audits(self, *, scope: str, memory_ids: list[str]) -> None:
+        """从查询审计中清理已硬删除记忆的原文片段。"""
+
+        if not memory_ids:
+            return
+        deleted = set(memory_ids)
+        with Session(self.engine) as session:
+            rows = list(session.scalars(select(QueryAuditRow).where(QueryAuditRow.scope == scope)).all())
+            for row in rows:
+                selected = set(row.selected_memory_ids or [])
+                row.retrieved = [
+                    {**item, "content_preview": None}
+                    if item.get("memory_id") in deleted
+                    else item
+                    for item in row.retrieved
+                ]
+                if selected & deleted:
+                    row.final_answer = None
+            session.commit()
+
 
 def _memory_from_row(row: MemoryRow) -> MemoryRecord:
     """将数据库行转换为领域记忆对象。
@@ -199,5 +308,42 @@ def _memory_from_row(row: MemoryRow) -> MemoryRecord:
         scope=row.scope,
         content=row.content,
         occurred_at=row.occurred_at,
+        created_at=row.created_at,
+    )
+
+
+def _query_audit_from_row(row: QueryAuditRow) -> QueryAuditRecord:
+    """将查询审计行转换为领域对象。"""
+
+    return QueryAuditRecord(
+        query_id=row.query_id,
+        scope=row.scope,
+        original_query=row.original_query,
+        query_type=row.query_type,
+        rewritten_queries=list(row.rewritten_queries or []),
+        candidate_limit=row.candidate_limit,
+        retrieved=list(row.retrieved or []),
+        selected_memory_ids=list(row.selected_memory_ids or []),
+        final_answer=row.final_answer,
+        status=row.status,
+        error_stage=row.error_stage,
+        error_message=row.error_message,
+        created_at=row.created_at,
+    )
+
+
+def _delete_audit_from_row(row: DeleteAuditRow) -> DeleteAuditRecord:
+    """将删除审计行转换为领域对象。"""
+
+    return DeleteAuditRecord(
+        delete_id=row.delete_id,
+        scope=row.scope,
+        target=dict(row.target or {}),
+        dry_run=bool(row.dry_run),
+        matched_memory_ids=list(row.matched_memory_ids or []),
+        affected_memory_ids=list(row.affected_memory_ids or []),
+        status=row.status,
+        error_code=row.error_code,
+        error_message=row.error_message,
         created_at=row.created_at,
     )
