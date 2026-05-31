@@ -1,6 +1,8 @@
+from datetime import UTC, datetime
+from unittest.mock import patch
+
 from memoflux.api import create_app
 from memoflux.config import load_settings
-from datetime import UTC, datetime
 
 from memoflux.llm import LLMResult, OpenAICompatibleLLMClient
 from memoflux.models import MemoryRecord
@@ -74,6 +76,25 @@ class SelectiveReferenceLLMClient(FakeLLMClient):
         )
 
 
+class DiagnosticReferenceLLMClient(FakeLLMClient):
+    def synthesize_answer(self, *, query: str, memories: list) -> LLMResult:
+        self.calls.append(("synthesize_answer", query, len(memories)))
+        return LLMResult(
+            output={
+                "answer": "Atlas 当前依赖 AuthGate 服务。",
+                "confidence": 0.9,
+                "used_memory_ids": [memories[0].memory_id],
+                "relevance_by_id": {memories[0].memory_id: "该记忆直接说明当前依赖。"},
+                "answerability": "answerable",
+                "answerability_reason": "候选记忆主体一致，并明确给出当前依赖。",
+                "uncertainties": [],
+            },
+            input_tokens=20,
+            output_tokens=10,
+            model="fake",
+        )
+
+
 class NoEvidenceLLMClient(FakeLLMClient):
     def synthesize_answer(self, *, query: str, memories: list) -> LLMResult:
         self.calls.append(("synthesize_answer", query, len(memories)))
@@ -123,6 +144,55 @@ class CountingLLMClient(FakeLLMClient):
         )
 
 
+class AuditCountingLLMClient(CountingLLMClient):
+    def synthesize_answer(self, *, query: str, memories: list, query_type: str = "direct") -> LLMResult:
+        self.synthesis_candidate_count = len(memories)
+        return LLMResult(
+            output={
+                "answer": "只引用第一条记忆",
+                "confidence": 0.8,
+                "used_memory_ids": [memories[0].memory_id],
+                "relevance_by_id": {memories[0].memory_id: "第一条记忆提供答案。"},
+                "uncertainties": [],
+            },
+            input_tokens=20,
+            output_tokens=10,
+            model="fake",
+        )
+
+
+class CaptureMemoryOrderLLMClient(FakeLLMClient):
+    def __init__(self, query_type: str) -> None:
+        super().__init__()
+        self.query_type = query_type
+        self.captured_memory_ids: list[str] = []
+
+    def plan_query(self, *, query: str) -> LLMResult:
+        return LLMResult(
+            output={"query_type": self.query_type, "rewritten_queries": [query]},
+            input_tokens=1,
+            output_tokens=1,
+            model="fake",
+        )
+
+    def synthesize_answer(self, *, query: str, memories: list, query_type: str = "direct") -> LLMResult:
+        self.captured_memory_ids = [memory.memory_id for memory in memories]
+        return LLMResult(
+            output={
+                "answer": "captured",
+                "confidence": 0.8,
+                "used_memory_ids": [memories[0].memory_id],
+                "relevance_by_id": {memories[0].memory_id: "第一条候选用于答案。"},
+                "answerability": "answerable",
+                "answerability_reason": "测试捕获候选顺序。",
+                "uncertainties": [],
+            },
+            input_tokens=1,
+            output_tokens=1,
+            model="fake",
+        )
+
+
 class ExpandedCandidateRepository(MemoryRepository):
     def search_memories(self, *, session: str, terms: set[str], limit: int, query_embedding=None):
         return [
@@ -134,6 +204,33 @@ class ExpandedCandidateRepository(MemoryRepository):
                 created_at=datetime(2026, 5, index, 10, tzinfo=UTC),
             )
             for index in range(1, limit + 1)
+        ]
+
+
+class DependencyCandidateRepository(MemoryRepository):
+    def search_memories(self, *, session: str, terms: set[str], limit: int, query_embedding=None):
+        return [
+            MemoryRecord(
+                memory_id="older-current",
+                session=session,
+                content="Falcon 项目当前依赖 AuthGate 服务，依赖风险是容器健康检查误判，之前依赖记录不再作为当前判断依据。",
+                occurred_at=datetime(2026, 5, 10, 10, tzinfo=UTC),
+                created_at=datetime(2026, 5, 10, 10, tzinfo=UTC),
+            ),
+            MemoryRecord(
+                memory_id="newer-current",
+                session=session,
+                content="Falcon 项目当前依赖 ReportLab 服务，依赖风险是发布审批链路超时，之前依赖记录不再作为当前判断依据。",
+                occurred_at=datetime(2026, 5, 20, 10, tzinfo=UTC),
+                created_at=datetime(2026, 5, 20, 10, tzinfo=UTC),
+            ),
+            MemoryRecord(
+                memory_id="older-history",
+                session=session,
+                content="Falcon 项目依赖 SignalBox 服务，依赖风险是供应商接口限流。",
+                occurred_at=datetime(2026, 5, 3, 10, tzinfo=UTC),
+                created_at=datetime(2026, 5, 3, 10, tzinfo=UTC),
+            ),
         ]
 
 
@@ -208,8 +305,29 @@ class FakeChatLLMClient(OpenAICompatibleLLMClient):
         super().__init__(base_url="http://unused", api_key="unused", model="fake")
         self.content = content
 
-    def _chat(self, messages: list[dict[str, str]]) -> LLMResult:
+    def _chat(self, messages: list[dict[str, str]], **_) -> LLMResult:
         return LLMResult(output={"content": self.content}, input_tokens=10, output_tokens=5, model="fake")
+
+
+class CapturePayloadLLMClient(OpenAICompatibleLLMClient):
+    def __init__(self) -> None:
+        super().__init__(base_url="http://unused", api_key="unused", model="fake")
+        self.payload = None
+
+    def capture_urlopen(self, request, timeout):
+        self.payload = __import__("json").loads(request.data.decode("utf-8"))
+
+        class _Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, traceback):
+                return False
+
+            def read(self):
+                return b'{"model":"fake","choices":[{"message":{"content":"{\\"query_type\\":\\"direct\\",\\"rewritten_queries\\":[\\"q\\"]}"}}],"usage":{"prompt_tokens":1,"completion_tokens":1}}'
+
+        return _Response()
 
 
 
@@ -527,6 +645,8 @@ def test_openai_synthesizer_invalid_json_fails_closed():
         "confidence": 0.1,
         "used_memory_ids": [],
         "relevance_by_id": {},
+        "answerability": "not_answerable",
+        "answerability_reason": "Answer Synthesizer 输出无法解析或不符合结构化 schema。",
         "uncertainties": ["invalid_llm_output"],
     }
 
@@ -548,12 +668,91 @@ def test_openai_synthesizer_invalid_schema_fails_closed():
         "confidence": 0.1,
         "used_memory_ids": [],
         "relevance_by_id": {},
+        "answerability": "not_answerable",
+        "answerability_reason": "Answer Synthesizer 输出无法解析或不符合结构化 schema。",
         "uncertainties": ["invalid_llm_output"],
     }
 
 
-def test_recall_passes_expanded_candidate_pool_to_synthesizer():
+def test_openai_client_uses_deterministic_temperature():
+    llm_client = CapturePayloadLLMClient()
+
+    with patch("urllib.request.urlopen", llm_client.capture_urlopen):
+        llm_client.plan_query(query="q")
+
+    assert llm_client.payload is not None
+    assert llm_client.payload["temperature"] == 0.0
+
+
+def test_openai_client_injects_pydantic_schema_into_answer_synthesis_prompt():
+    llm_client = CapturePayloadLLMClient()
+    memory = MemoryRecord(
+        memory_id="m1",
+        session="s",
+        content="Atlas 项目当前依赖 AuthGate 服务。",
+        occurred_at=datetime(2026, 5, 1, 10, tzinfo=UTC),
+        created_at=datetime(2026, 5, 1, 10, tzinfo=UTC),
+    )
+
+    with patch("urllib.request.urlopen", llm_client.capture_urlopen):
+        llm_client.synthesize_answer(query="Atlas 当前依赖哪个服务？", memories=[memory])
+
+    assert llm_client.payload is not None
+    assert "response_format" not in llm_client.payload
+    system_prompt = llm_client.payload["messages"][0]["content"]
+    assert "AnswerSynthesisOutput" in system_prompt
+    assert "answerability" in system_prompt
+    assert "JSON Schema" in system_prompt
+
+
+def test_openai_client_injects_pydantic_schema_into_query_plan_prompt():
+    llm_client = CapturePayloadLLMClient()
+
+    with patch("urllib.request.urlopen", llm_client.capture_urlopen):
+        llm_client.plan_query(query="Atlas 当前依赖哪个服务？")
+
+    assert llm_client.payload is not None
+    assert "response_format" not in llm_client.payload
+    system_prompt = llm_client.payload["messages"][0]["content"]
+    assert "QueryPlanOutput" in system_prompt
+    assert "query_type" in system_prompt
+    assert "JSON Schema" in system_prompt
+
+
+def test_direct_recall_audits_expanded_pool_but_synthesizes_top_k_candidates():
+    llm_client = AuditCountingLLMClient()
+    repository = ExpandedCandidateRepository()
+    app = create_app(
+        repository=repository,
+        llm_client=llm_client,
+        embedding_client=FakeEmbeddingService(),
+    )
+    from fastapi.testclient import TestClient
+
+    client = TestClient(app)
+    response = client.post("/v1/recall", json={"session": "s", "query": "Atlas?", "top_k": 2})
+
+    data = response.json()["data"]
+    audits_response = client.get("/v1/audits", params={"session": "s"})
+    audits = audits_response.json()["data"]["items"]
+    assert response.status_code == 200
+    assert llm_client.synthesis_candidate_count == 2
+    assert len(audits[0]["retrieved"]) == 6
+    assert data["references"] == [
+        {
+            "memory_id": "m1",
+            "occurred_at": "2026-05-01T10:00:00+00:00",
+            "quote": "第 1 条 Atlas 记忆。",
+            "relevance": "第一条记忆提供答案。",
+        }
+    ]
+
+
+def test_history_recall_passes_expanded_candidate_pool_to_synthesizer():
     llm_client = CountingLLMClient()
+    llm_client.plan_query = lambda *, query: LLMResult(
+        output={"query_type": "history", "rewritten_queries": [query]}, input_tokens=1, output_tokens=1, model="fake"
+    )
     app = create_app(
         repository=ExpandedCandidateRepository(),
         llm_client=llm_client,
@@ -575,6 +774,82 @@ def test_recall_passes_expanded_candidate_pool_to_synthesizer():
             "relevance": "第三条记忆提供答案。",
         }
     ]
+
+
+def test_association_recall_passes_expanded_candidate_pool_to_synthesizer():
+    llm_client = CountingLLMClient()
+    llm_client.plan_query = lambda *, query: LLMResult(
+        output={"query_type": "association", "rewritten_queries": [query]}, input_tokens=1, output_tokens=1, model="fake"
+    )
+    app = create_app(
+        repository=ExpandedCandidateRepository(),
+        llm_client=llm_client,
+        embedding_client=FakeEmbeddingService(),
+    )
+    from fastapi.testclient import TestClient
+
+    client = TestClient(app)
+    response = client.post("/v1/recall", json={"session": "s", "query": "Atlas 当前依赖哪个服务？", "top_k": 2})
+
+    assert response.status_code == 200
+    assert llm_client.synthesis_candidate_count == 6
+
+
+def test_dependency_risk_recall_passes_expanded_candidate_pool_to_synthesizer():
+    llm_client = CountingLLMClient()
+    llm_client.plan_query = lambda *, query: LLMResult(
+        output={"query_type": "dependency_risk", "rewritten_queries": [query]}, input_tokens=1, output_tokens=1, model="fake"
+    )
+    app = create_app(
+        repository=ExpandedCandidateRepository(),
+        llm_client=llm_client,
+        embedding_client=FakeEmbeddingService(),
+    )
+    from fastapi.testclient import TestClient
+
+    client = TestClient(app)
+    response = client.post("/v1/recall", json={"session": "s", "query": "Atlas 当前依赖风险是什么？", "top_k": 2})
+
+    assert response.status_code == 200
+    assert llm_client.synthesis_candidate_count == 6
+
+
+def test_dependency_analysis_recall_passes_expanded_candidate_pool_to_synthesizer():
+    llm_client = CountingLLMClient()
+    llm_client.plan_query = lambda *, query: LLMResult(
+        output={"query_type": "dependency_analysis", "rewritten_queries": [query]},
+        input_tokens=1,
+        output_tokens=1,
+        model="fake",
+    )
+    app = create_app(
+        repository=ExpandedCandidateRepository(),
+        llm_client=llm_client,
+        embedding_client=FakeEmbeddingService(),
+    )
+    from fastapi.testclient import TestClient
+
+    client = TestClient(app)
+    response = client.post("/v1/recall", json={"session": "s", "query": "Atlas 当前依赖分析是什么？", "top_k": 2})
+
+    assert response.status_code == 200
+    assert llm_client.synthesis_candidate_count == 6
+
+
+def test_current_dependency_candidates_prioritize_newer_current_facts():
+    llm_client = CaptureMemoryOrderLLMClient(query_type="dependency_risk")
+    app = create_app(
+        repository=DependencyCandidateRepository(),
+        llm_client=llm_client,
+        embedding_client=FakeEmbeddingService(),
+    )
+    from fastapi.testclient import TestClient
+
+    client = TestClient(app)
+    response = client.post("/v1/recall", json={"session": "s", "query": "Falcon 当前依赖哪个服务？", "top_k": 3})
+
+    assert response.status_code == 200
+    assert llm_client.captured_memory_ids[:3] == ["newer-current", "older-current", "older-history"]
 
 
 def test_history_recall_includes_list_memory_pool_when_vector_misses():
@@ -653,6 +928,30 @@ def test_audits_return_selection_reasons():
     item = audits_response.json()["data"]["items"][0]
     selected_id = item["selected_memory_ids"][0]
     assert item["selection_reasons"] == {selected_id: "只引用第一条记忆。"}
+
+
+def test_audits_return_answerability_diagnostics():
+    llm_client = DiagnosticReferenceLLMClient()
+    app = create_app(repository=MemoryRepository(), llm_client=llm_client, embedding_client=FakeEmbeddingService())
+    from fastapi.testclient import TestClient
+
+    client = TestClient(app)
+    client.post(
+        "/v1/ingest",
+        json={
+            "session": "s",
+            "content": "Atlas 项目当前依赖 AuthGate 服务，依赖风险是容器健康检查误判导致发布暂停。",
+            "occurred_at": "2026-05-01T10:00:00Z",
+        },
+    )
+    recall_response = client.post("/v1/recall", json={"session": "s", "query": "Atlas 当前依赖哪个服务？"})
+    query_id = recall_response.json()["data"]["query_id"]
+
+    audits_response = client.get("/v1/audits", params={"session": "s", "query_id": query_id})
+
+    item = audits_response.json()["data"]["items"][0]
+    assert item["answerability"] == "answerable"
+    assert item["answerability_reason"] == "候选记忆主体一致，并明确给出当前依赖。"
 
 
 def test_delete_records_audit_and_scrubs_deleted_content_from_query_audits():
@@ -790,6 +1089,25 @@ def test_answer_synthesis_output_accepts_relevance_by_id():
     )
 
     assert output.relevance_by_id == {"m1": "该记忆直接说明 Atlas 延期原因。"}
+
+
+def test_answer_synthesis_output_accepts_answerability_diagnostics():
+    from memoflux.llm_schemas import AnswerSynthesisOutput
+
+    output = AnswerSynthesisOutput.model_validate(
+        {
+            "answer": "Atlas 当前依赖 AuthGate 服务。",
+            "confidence": 0.9,
+            "used_memory_ids": ["m1"],
+            "relevance_by_id": {"m1": "该记忆直接说明当前依赖。"},
+            "answerability": "answerable",
+            "answerability_reason": "候选记忆主体一致，并明确给出当前依赖。",
+            "uncertainties": [],
+        }
+    )
+
+    assert output.answerability == "answerable"
+    assert output.answerability_reason == "候选记忆主体一致，并明确给出当前依赖。"
 
 
 def test_postgres_scrub_uses_session_value_in_query(monkeypatch):

@@ -82,3 +82,22 @@ Recall uses the original query plus LLM rewritten queries for vector retrieval, 
 ```bash
 pytest tests/test_api.py
 ```
+
+## Run Recall Evals
+
+Generate the mixed recall suite and run it against a local MemoFlux service:
+
+```bash
+python -m evals.scripts.generate_mixed_1000_suite --output evals/cases/mixed_1000.json
+python -m evals.scripts.eval_memoflux_recall --suite evals/cases/mixed_1000.json --base-url http://127.0.0.1:8020
+```
+
+For shorter failure-focused reports, keep only failed details and write the JSON report to a file:
+
+```bash
+python -m evals.scripts.eval_memoflux_recall \
+  --suite evals/cases/mixed_1000.json \
+  --base-url http://127.0.0.1:8020 \
+  --only-failures \
+  --output /tmp/memoflux_failures.json
+```

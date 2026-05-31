@@ -36,7 +36,19 @@ def build_suite(seed: int = 20260531) -> dict:
 
     random.seed(seed)
     truth = {
-        project: {"latest_delay_id": None, "latest_delay_reason": None, "owner_id": None, "owner": None, "history_ids": []}
+        project: {
+            "latest_delay_id": None,
+            "latest_delay_reason": None,
+            "latest_delay_ids_by_reason": {},
+            "owner_id": None,
+            "owner": None,
+            "history_ids": [],
+            "current_association_id": None,
+            "current_association_dep": None,
+            "current_association_reason": None,
+            "association_history_ids": [],
+            "association_history_deps": [],
+        }
         for project in PROJECTS
     }
     memories = []
@@ -46,7 +58,7 @@ def build_suite(seed: int = 20260531) -> dict:
             reason = REASONS[(index + round_index) % len(REASONS)]
             owner = OWNERS[(project_index + round_index) % len(OWNERS)]
             dep = DEPS[(project_index + round_index) % len(DEPS)]
-            day = (index % 28) + 1
+            day = round_index + 1
             hour = 8 + (index % 10)
             kind = round_index % 10
             memory_id = f"m_{index:04d}"
@@ -54,12 +66,18 @@ def build_suite(seed: int = 20260531) -> dict:
                 content = f"{project} 项目延期，原因是{reason}。"
                 truth[project]["latest_delay_id"] = memory_id
                 truth[project]["latest_delay_reason"] = reason
+                truth[project]["latest_delay_ids_by_reason"].setdefault(reason, []).append(memory_id)
             elif kind == 1:
                 content = f"{project} 项目负责人是{owner}。"
                 truth[project]["owner_id"] = memory_id
                 truth[project]["owner"] = owner
             elif kind == 2:
                 content = f"{project} 项目依赖 {dep} 服务，依赖风险是{reason}。"
+                truth[project]["association_history_ids"].append(memory_id)
+                truth[project]["association_history_deps"].append(dep)
+                truth[project]["current_association_id"] = memory_id
+                truth[project]["current_association_dep"] = dep
+                truth[project]["current_association_reason"] = reason
             elif kind == 3:
                 content = f"{project} 项目发布历史：第 {len(truth[project]['history_ids']) + 1} 次发布因{reason}暂停。"
                 truth[project]["history_ids"].append(memory_id)
@@ -76,8 +94,14 @@ def build_suite(seed: int = 20260531) -> dict:
                 content = f"{project} 项目延期原因纠正为{corrected}，之前记录的{reason}不再作为当前判断依据。"
                 truth[project]["latest_delay_id"] = memory_id
                 truth[project]["latest_delay_reason"] = corrected
+                truth[project]["latest_delay_ids_by_reason"].setdefault(corrected, []).append(memory_id)
             else:
-                content = f"{project} 项目与 {dep} 服务联调完成，下一步关注{reason}。"
+                content = f"{project} 项目当前依赖 {dep} 服务，依赖风险是{reason}，之前依赖记录不再作为当前判断依据。"
+                truth[project]["association_history_ids"].append(memory_id)
+                truth[project]["association_history_deps"].append(dep)
+                truth[project]["current_association_id"] = memory_id
+                truth[project]["current_association_dep"] = dep
+                truth[project]["current_association_reason"] = reason
             memories.append(
                 {
                     "id": memory_id,
@@ -88,14 +112,16 @@ def build_suite(seed: int = 20260531) -> dict:
             )
     queries = []
     for project in random.sample(PROJECTS, 30):
+        latest_reason = truth[project]["latest_delay_reason"]
         queries.append(
             {
                 "id": f"latest_delay_{project}",
                 "session": "{{session}}",
                 "kind": "latest_delay",
                 "query": f"{project} 当前延期原因是什么？",
-                "expected_answer_contains": [truth[project]["latest_delay_reason"]],
+                "expected_answer_contains": [latest_reason],
                 "expected_reference_memory_ids": [truth[project]["latest_delay_id"]],
+                "acceptable_reference_memory_ids": truth[project]["latest_delay_ids_by_reason"].get(latest_reason, []),
             }
         )
     for project in random.sample(PROJECTS, 20):
@@ -120,6 +146,31 @@ def build_suite(seed: int = 20260531) -> dict:
                 "expected_reference_memory_ids": [truth[project]["owner_id"]],
             }
         )
+    for project in random.sample(PROJECTS, 15):
+        queries.append(
+            {
+                "id": f"current_association_{project}",
+                "session": "{{session}}",
+                "kind": "current_association",
+                "query": f"{project} 当前依赖哪个服务，当前依赖风险是什么？",
+                "expected_answer_contains": [
+                    truth[project]["current_association_dep"],
+                    truth[project]["current_association_reason"],
+                ],
+                "expected_reference_memory_ids": [truth[project]["current_association_id"]],
+            }
+        )
+    for project in random.sample(PROJECTS, 10):
+        queries.append(
+            {
+                "id": f"association_history_{project}",
+                "session": "{{session}}",
+                "kind": "association_history",
+                "query": f"按历史记录总结 {project} 依赖过哪些服务。",
+                "expected_answer_contains": sorted(set(truth[project]["association_history_deps"])),
+                "expected_reference_memory_ids": truth[project]["association_history_ids"],
+            }
+        )
     for project in ["Apollo", "Borealis", "Cygnus", "Draco", "Equinox", "Fenix", "Gemini", "Hydra", "Ion", "Janus"]:
         queries.append(
             {
@@ -134,7 +185,7 @@ def build_suite(seed: int = 20260531) -> dict:
     random.shuffle(queries)
     return {
         "suite_id": "mixed_1000",
-        "description": "Single-session 1000-memory MemoFlux recall suite covering latest/correction, history, owner, and no-evidence cases.",
+        "description": "Single-session 1000-memory MemoFlux recall suite covering latest/correction, history, owner, current association, association history, and no-evidence cases.",
         "defaults": {"top_k": 12},
         "memories": memories,
         "queries": queries,

@@ -58,6 +58,10 @@ def evaluate_recall(
     references = list(recall_data.get("references") or [])
     reference_ids = {str(reference.get("memory_id")) for reference in references}
     expected_reference_ids = _case_ids_to_memory_ids(query_case.get("expected_reference_memory_ids", []), memory_id_map)
+    acceptable_reference_ids = _case_ids_to_memory_ids(
+        query_case.get("acceptable_reference_memory_ids") or query_case.get("expected_reference_memory_ids", []),
+        memory_id_map,
+    )
     forbidden_reference_ids = _case_ids_to_memory_ids(query_case.get("forbidden_reference_memory_ids", []), memory_id_map)
     missing_answer_terms = [term for term in query_case.get("expected_answer_contains", []) if str(term) not in answer]
     forbidden_answer_terms = [term for term in query_case.get("forbidden_answer_contains", []) if str(term) in answer]
@@ -65,8 +69,11 @@ def evaluate_recall(
     noisy_reference_ids = [memory_id for memory_id in forbidden_reference_ids if memory_id in reference_ids]
     retrieved_ids = {str(item.get("memory_id")) for item in (audit or {}).get("retrieved", [])}
     selected_ids = {str(memory_id) for memory_id in (audit or {}).get("selected_memory_ids", [])}
-    missing_retrieved_ids = [memory_id for memory_id in expected_reference_ids if audit is not None and memory_id not in retrieved_ids]
-    missing_selected_ids = [memory_id for memory_id in expected_reference_ids if audit is not None and memory_id not in selected_ids]
+    retrieval_hit = _any_expected_hit(acceptable_reference_ids, retrieved_ids) if audit is not None else None
+    selection_hit = _any_expected_hit(acceptable_reference_ids, selected_ids) if audit is not None else None
+    missing_retrieved_ids = [] if retrieval_hit in {None, True} else acceptable_reference_ids
+    missing_selected_ids = [] if selection_hit in {None, True} else acceptable_reference_ids
+    strict_correct = not missing_answer_terms and not missing_reference_ids
     no_evidence_correct = None
     if query_case.get("expect_no_evidence"):
         no_evidence_correct = (
@@ -81,6 +88,7 @@ def evaluate_recall(
         "query_id": query_case.get("id"),
         "kind": query_case.get("kind", "unknown"),
         "correct": answer_correct and not answer_noise and not ref_noise,
+        "strict_correct": strict_correct and not answer_noise and not ref_noise,
         "answer_correct": answer_correct,
         "no_evidence_correct": no_evidence_correct,
         "answer_noise": answer_noise,
@@ -88,9 +96,10 @@ def evaluate_recall(
         "missing_answer_terms": missing_answer_terms,
         "forbidden_answer_terms": forbidden_answer_terms,
         "missing_reference_case_ids": _memory_ids_to_case_ids(missing_reference_ids, memory_id_map),
+        "missing_strict_reference_case_ids": _memory_ids_to_case_ids(missing_reference_ids, memory_id_map),
         "noisy_reference_case_ids": _memory_ids_to_case_ids(noisy_reference_ids, memory_id_map),
-        "retrieval_hit": None if audit is None else not missing_retrieved_ids,
-        "selection_hit": None if audit is None else not missing_selected_ids,
+        "retrieval_hit": retrieval_hit,
+        "selection_hit": selection_hit,
         "missing_retrieved_case_ids": _memory_ids_to_case_ids(missing_retrieved_ids, memory_id_map),
         "missing_selected_case_ids": _memory_ids_to_case_ids(missing_selected_ids, memory_id_map),
         "answer": answer,
@@ -152,9 +161,44 @@ def main() -> None:
     parser.add_argument("--suite", required=True, type=Path, help="Path to eval suite JSON")
     parser.add_argument("--base-url", default="http://127.0.0.1:8020", help="MemoFlux base URL")
     parser.add_argument("--session", default=None, help="Optional eval session")
+    parser.add_argument("--only-failures", action="store_true", help="Only include failed details in the printed report")
+    parser.add_argument("--output", type=Path, default=None, help="Optional path to write the JSON report")
     args = parser.parse_args()
     result = run_suite(suite_path=args.suite, base_url=args.base_url, session=args.session)
-    print(json.dumps(result, ensure_ascii=False, indent=2))
+    report = build_report_output(result, only_failures=args.only_failures)
+    if args.output is not None:
+        write_report(report, output_path=args.output)
+    print(json.dumps(report, ensure_ascii=False, indent=2))
+
+
+def build_report_output(result: dict[str, Any], *, only_failures: bool) -> dict[str, Any]:
+    """构造命令行输出报告，可按需仅保留失败明细。
+
+    Args:
+        result: `run_suite` 返回的完整评测结果。
+        only_failures: 为 True 时仅保留 `correct` 为 False 的明细。
+
+    Returns:
+        用于打印或写文件的 JSON 可序列化报告。
+    """
+
+    if not only_failures:
+        return result
+    report = dict(result)
+    report["details"] = [detail for detail in result.get("details", []) if not bool(detail.get("correct"))]
+    return report
+
+
+def write_report(report: dict[str, Any], *, output_path: Path) -> None:
+    """将评测报告写入 JSON 文件。
+
+    Args:
+        report: JSON 可序列化评测报告。
+        output_path: 输出文件路径，父目录不存在时会自动创建。
+    """
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
 
 def build_recall_payload(query_case: dict[str, Any], *, session: str, top_k: int) -> dict[str, Any]:
@@ -232,6 +276,20 @@ def _memory_ids_to_case_ids(memory_ids: list[str], memory_id_map: dict[str, str]
     return [by_memory_id.get(memory_id, memory_id) for memory_id in memory_ids]
 
 
+def _any_expected_hit(expected_ids: list[str], actual_ids: set[str]) -> bool:
+    """判断期望证据集合是否被命中。
+
+    Args:
+        expected_ids: 可接受的期望 memory_id 列表。
+        actual_ids: 实际召回或选择的 memory_id 集合。
+
+    Returns:
+        没有配置期望证据时返回 True；否则任意一个期望证据命中即返回 True。
+    """
+
+    return True if not expected_ids else bool(set(expected_ids) & actual_ids)
+
+
 def _safe_float(value: Any) -> float:
     try:
         return float(value)
@@ -243,13 +301,17 @@ def _aggregate(details: list[dict[str, Any]]) -> dict[str, Any]:
     by_kind: dict[str, dict[str, int]] = {}
     for detail in details:
         kind = str(detail["kind"])
-        by_kind.setdefault(kind, {"total": 0, "correct": 0})
+        by_kind.setdefault(kind, {"total": 0, "correct": 0, "answer_correct": 0, "strict_correct": 0})
         by_kind[kind]["total"] += 1
         by_kind[kind]["correct"] += int(bool(detail["correct"]))
+        by_kind[kind]["answer_correct"] += int(bool(detail["answer_correct"]))
+        by_kind[kind]["strict_correct"] += int(bool(detail["strict_correct"]))
     return {
         "overall": {
             "total": len(details),
             "correct": sum(int(bool(detail["correct"])) for detail in details),
+            "answer_correct": sum(int(bool(detail["answer_correct"])) for detail in details),
+            "strict_correct": sum(int(bool(detail["strict_correct"])) for detail in details),
         },
         "by_kind": by_kind,
         "answer_noise_count": sum(int(bool(detail["answer_noise"])) for detail in details),

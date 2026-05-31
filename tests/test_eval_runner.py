@@ -1,7 +1,10 @@
 import json
+import sys
 from pathlib import Path
+from unittest.mock import patch
 
-from evals.scripts.eval_memoflux_recall import build_recall_payload, evaluate_recall, load_suite
+from evals.scripts import eval_memoflux_recall
+from evals.scripts.eval_memoflux_recall import build_report_output, build_recall_payload, evaluate_recall, load_suite, write_report
 from evals.scripts.generate_mixed_1000_suite import build_suite
 
 
@@ -113,6 +116,37 @@ def test_evaluate_recall_keeps_answer_correct_separate_from_selection_hit():
     assert result["missing_reference_case_ids"] == ["expected_correction"]
 
 
+def test_evaluate_recall_accepts_equivalent_reference_ids():
+    memory_id_map = {
+        "expected_correction": "m-expected",
+        "equivalent_correction": "m-equivalent",
+    }
+    query_case = {
+        "id": "latest_delay",
+        "kind": "latest_delay",
+        "expected_answer_contains": ["行情数据清洗规则冲突"],
+        "expected_reference_memory_ids": ["expected_correction"],
+        "acceptable_reference_memory_ids": ["expected_correction", "equivalent_correction"],
+    }
+    recall_data = {
+        "answer": "行情数据清洗规则冲突",
+        "confidence": 0.95,
+        "references": [{"memory_id": "m-equivalent", "quote": "等价纠错记忆"}],
+    }
+    audit = {
+        "retrieved": [{"memory_id": "m-equivalent", "content_preview": "等价纠错记忆"}],
+        "selected_memory_ids": ["m-equivalent"],
+    }
+
+    result = evaluate_recall(query_case, recall_data, memory_id_map, audit=audit)
+
+    assert result["selection_hit"] is True
+    assert result["strict_correct"] is False
+    assert result["correct"] is True
+    assert result["missing_selected_case_ids"] == []
+    assert result["missing_strict_reference_case_ids"] == ["expected_correction"]
+
+
 def test_evaluate_recall_validates_no_evidence_response():
     query_case = {
         "id": "orion_no_evidence",
@@ -153,6 +187,67 @@ def test_build_recall_payload_excludes_eval_assertion_fields():
     }
 
 
+def test_build_report_output_can_filter_to_failures_only():
+    result = {
+        "suite_id": "suite",
+        "session": "session",
+        "metrics": {"overall": {"total": 2, "correct": 1}},
+        "details": [
+            {"query_id": "ok", "correct": True, "answer": "ok"},
+            {"query_id": "failed", "correct": False, "answer": "当前 session 中没有足够记忆支持回答该问题。"},
+        ],
+    }
+
+    output = build_report_output(result, only_failures=True)
+
+    assert output["suite_id"] == "suite"
+    assert output["session"] == "session"
+    assert output["metrics"] == {"overall": {"total": 2, "correct": 1}}
+    assert output["details"] == [
+        {"query_id": "failed", "correct": False, "answer": "当前 session 中没有足够记忆支持回答该问题。"}
+    ]
+
+
+def test_write_report_writes_json_file(tmp_path):
+    report_path = tmp_path / "report.json"
+    result = {"suite_id": "suite", "details": []}
+
+    write_report(result, output_path=report_path)
+
+    assert json.loads(report_path.read_text(encoding="utf-8")) == result
+
+
+def test_main_supports_only_failures_and_output_file(tmp_path, capsys):
+    report_path = tmp_path / "reports" / "failures.json"
+    result = {
+        "suite_id": "suite",
+        "session": "session",
+        "details": [
+            {"query_id": "ok", "correct": True},
+            {"query_id": "failed", "correct": False},
+        ],
+    }
+
+    with patch.object(eval_memoflux_recall, "run_suite", return_value=result), patch.object(
+        sys,
+        "argv",
+        [
+            "eval_memoflux_recall.py",
+            "--suite",
+            "evals/cases/smoke_small.json",
+            "--only-failures",
+            "--output",
+            str(report_path),
+        ],
+    ):
+        eval_memoflux_recall.main()
+
+    printed = json.loads(capsys.readouterr().out)
+    written = json.loads(report_path.read_text(encoding="utf-8"))
+    assert printed["details"] == [{"query_id": "failed", "correct": False}]
+    assert written == printed
+
+
 def test_smoke_small_suite_is_valid():
     suite = load_suite(Path("evals/cases/smoke_small.json"))
 
@@ -166,5 +261,48 @@ def test_build_mixed_1000_suite_is_reproducible():
 
     assert suite["suite_id"] == "mixed_1000"
     assert len(suite["memories"]) == 1000
-    assert len(suite["queries"]) == 75
+    assert len(suite["queries"]) == 100
+    latest_delay_cases = [query for query in suite["queries"] if query["kind"] == "latest_delay"]
+    assert all("acceptable_reference_memory_ids" in query for query in latest_delay_cases)
     assert suite == build_suite(seed=20260531)
+
+
+def test_build_mixed_1000_suite_splits_current_and_history_association_cases():
+    suite = build_suite(seed=20260531)
+    memories_by_id = {memory["id"]: memory for memory in suite["memories"]}
+    current_cases = [query for query in suite["queries"] if query["kind"] == "current_association"]
+    history_cases = [query for query in suite["queries"] if query["kind"] == "association_history"]
+
+    assert len(current_cases) == 15
+    assert len(history_cases) == 10
+    for query in current_cases:
+        assert query["expected_answer_contains"]
+        assert len(query["expected_reference_memory_ids"]) == 1
+        expected_memory = memories_by_id[query["expected_reference_memory_ids"][0]]
+        assert "当前依赖" in query["query"]
+        assert "当前判断依据" in expected_memory["content"]
+
+    for query in history_cases:
+        assert len(query["expected_reference_memory_ids"]) >= 2
+        assert "历史" in query["query"]
+        assert all("依赖" in memories_by_id[memory_id]["content"] for memory_id in query["expected_reference_memory_ids"])
+
+
+def test_build_mixed_1000_latest_delay_timestamps_follow_truth_order():
+    suite = build_suite(seed=20260531)
+    memories_by_id = {memory["id"]: memory for memory in suite["memories"]}
+
+    for query in suite["queries"]:
+        if query["kind"] != "latest_delay":
+            continue
+        project = query["id"].removeprefix("latest_delay_")
+        expected_id = query["expected_reference_memory_ids"][0]
+        expected_at = memories_by_id[expected_id]["occurred_at"]
+        project_delay_memories = [
+            memory
+            for memory in suite["memories"]
+            if memory["content"].startswith(f"{project} 项目延期，")
+            or memory["content"].startswith(f"{project} 项目延期原因纠正为")
+        ]
+
+        assert all(memory["occurred_at"] <= expected_at for memory in project_delay_memories)

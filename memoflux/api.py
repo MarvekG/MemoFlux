@@ -192,7 +192,13 @@ def _audit_payload(audit: QueryAuditRecord | DeleteAuditRecord) -> dict[str, Any
             "candidate_limit": audit.candidate_limit,
             "retrieved": audit.retrieved,
             "selected_memory_ids": audit.selected_memory_ids,
-            "selection_reasons": audit.selection_reasons,
+            "selection_reasons": {
+                key: value
+                for key, value in audit.selection_reasons.items()
+                if not str(key).startswith("__")
+            },
+            "answerability": audit.selection_reasons.get("__answerability", "unknown"),
+            "answerability_reason": audit.selection_reasons.get("__answerability_reason", ""),
             "final_answer": audit.final_answer,
             "status": audit.status,
             "error_stage": audit.error_stage,

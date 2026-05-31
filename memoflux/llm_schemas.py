@@ -62,6 +62,8 @@ class AnswerSynthesisOutput(BaseModel):
     confidence: float = Field(default=0.6, ge=0.0, le=1.0)
     used_memory_ids: list[str] = Field(default_factory=list)
     relevance_by_id: dict[str, str] = Field(default_factory=dict)
+    answerability: str = "unknown"
+    answerability_reason: str = ""
     uncertainties: list[str] = Field(default_factory=list)
 
     @field_validator("relevance_by_id", mode="before")
