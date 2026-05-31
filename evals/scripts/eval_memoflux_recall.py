@@ -122,8 +122,11 @@ def run_suite(*, suite_path: Path, base_url: str, session: str | None = None) ->
 
     details = []
     for query_case in suite["queries"]:
-        payload = _render_templates(query_case, eval_session)
-        payload["top_k"] = int(query_case.get("top_k") or suite.get("defaults", {}).get("top_k") or 12)
+        payload = build_recall_payload(
+            query_case,
+            session=eval_session,
+            top_k=int(query_case.get("top_k") or suite.get("defaults", {}).get("top_k") or 12),
+        )
         status, body = _request(base_url, "POST", "/v1/recall", payload)
         if status != 200:
             raise RuntimeError(f"recall failed for {query_case.get('id')}: {body}")
@@ -151,6 +154,25 @@ def main() -> None:
     args = parser.parse_args()
     result = run_suite(suite_path=args.suite, base_url=args.base_url, session=args.session)
     print(json.dumps(result, ensure_ascii=False, indent=2))
+
+
+def build_recall_payload(query_case: dict[str, Any], *, session: str, top_k: int) -> dict[str, Any]:
+    """从评测查询用例构造 `/v1/recall` 请求体。
+
+    Args:
+        query_case: JSON 评测套中的查询用例。
+        session: 本次评测使用的 session。
+        top_k: recall 请求的 top_k。
+
+    Returns:
+        只包含 API 允许字段的请求体。
+    """
+
+    return {
+        "session": str(query_case["session"]).replace("{{session}}", session),
+        "query": str(query_case["query"]),
+        "top_k": top_k,
+    }
 
 
 def _request(base_url: str, method: str, path: str, payload: dict[str, Any]) -> tuple[int, dict[str, Any]]:

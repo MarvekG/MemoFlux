@@ -96,7 +96,7 @@ class MemoFluxService:
                 )
             )
             return result
-        synthesis = self.llm_client.synthesize_answer(query=query, memories=memories)
+        synthesis = _synthesize_answer(self.llm_client, query=query, query_type=query_type, memories=memories)
         self.repository.record_usage(
             operation="answer_synthesizer",
             input_tokens=synthesis.input_tokens,
@@ -317,6 +317,27 @@ def _candidate_pool_limit(top_k: int) -> int:
     """
 
     return max(top_k, min(top_k * 3, 60))
+
+
+def _synthesize_answer(llm_client, *, query: str, query_type: str, memories: list) -> LLMResult:
+    """调用 Answer Synthesizer，并兼容旧测试 fake client。
+
+    Args:
+        llm_client: LLM 客户端。
+        query: 原始查询。
+        query_type: Query Planner 输出的查询类型。
+        memories: 候选记忆。
+
+    Returns:
+        Answer Synthesizer 的结构化结果。
+    """
+
+    try:
+        return llm_client.synthesize_answer(query=query, query_type=query_type, memories=memories)
+    except TypeError as exc:
+        if "query_type" not in str(exc):
+            raise
+        return llm_client.synthesize_answer(query=query, memories=memories)
 
 
 def _audit_memory_item(memory) -> dict:

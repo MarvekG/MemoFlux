@@ -49,6 +49,7 @@ class AnswerSynthesisInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     query: str = Field(..., min_length=1)
+    query_type: str = "direct"
     memories: list[AnswerMemoryCandidate]
 
 

@@ -1,7 +1,7 @@
 import json
 from pathlib import Path
 
-from evals.scripts.eval_memoflux_recall import evaluate_recall, load_suite
+from evals.scripts.eval_memoflux_recall import build_recall_payload, evaluate_recall, load_suite
 from evals.scripts.generate_mixed_1000_suite import build_suite
 
 
@@ -104,6 +104,27 @@ def test_evaluate_recall_validates_no_evidence_response():
 
     assert result["correct"] is True
     assert result["no_evidence_correct"] is True
+
+
+def test_build_recall_payload_excludes_eval_assertion_fields():
+    query_case = {
+        "id": "atlas_latest_delay",
+        "session": "{{session}}",
+        "kind": "latest_delay",
+        "query": "Atlas 当前延期原因是什么？",
+        "expected_answer_contains": ["权限模型变更未完成安全评审"],
+        "expected_reference_memory_ids": ["atlas_corrected_delay"],
+        "forbidden_answer_contains": ["Zephyr"],
+        "forbidden_reference_memory_ids": ["zephyr_delay"],
+    }
+
+    payload = build_recall_payload(query_case, session="eval:session", top_k=6)
+
+    assert payload == {
+        "session": "eval:session",
+        "query": "Atlas 当前延期原因是什么？",
+        "top_k": 6,
+    }
 
 
 def test_smoke_small_suite_is_valid():

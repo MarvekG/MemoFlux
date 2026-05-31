@@ -193,6 +193,16 @@ class HistoryQueryLLMClient(FakeLLMClient):
         )
 
 
+class CaptureQueryTypeLLMClient(HistoryQueryLLMClient):
+    def __init__(self) -> None:
+        super().__init__()
+        self.captured_query_type = None
+
+    def synthesize_answer(self, *, query: str, memories: list, query_type: str = "direct") -> LLMResult:
+        self.captured_query_type = query_type
+        return super().synthesize_answer(query=query, memories=memories)
+
+
 class FakeChatLLMClient(OpenAICompatibleLLMClient):
     def __init__(self, content: str) -> None:
         super().__init__(base_url="http://unused", api_key="unused", model="fake")
@@ -582,6 +592,18 @@ def test_history_recall_includes_list_memory_pool_when_vector_misses():
     assert repository.list_limits == [6]
     synthesis_call = llm_client.calls[-1]
     assert synthesis_call == ("synthesize_answer", "按历史记录总结 Atlas 发布暂停原因。", ["vector-noise", "history-hit"])
+
+
+def test_recall_passes_query_type_to_answer_synthesizer():
+    llm_client = CaptureQueryTypeLLMClient()
+    app = create_app(repository=HistoryOnlyListRepository(), llm_client=llm_client, embedding_client=FakeEmbeddingService())
+    from fastapi.testclient import TestClient
+
+    client = TestClient(app)
+    response = client.post("/v1/recall", json={"session": "s", "query": "按历史记录总结 Atlas 发布暂停原因。", "top_k": 2})
+
+    assert response.status_code == 200
+    assert llm_client.captured_query_type == "history"
 
 
 def test_audits_return_persisted_recall_records():
