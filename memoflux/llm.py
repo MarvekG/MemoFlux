@@ -75,7 +75,6 @@ class OpenAICompatibleLLMClient:
     def synthesize_answer(self, *, query: str, memories: list) -> LLMResult:
         """调用真实 LLM 基于候选记忆整合答案。"""
 
-        memory_text = "\n".join(f"[{index + 1}] {memory.content}" for index, memory in enumerate(memories))
         prompt_input = AnswerSynthesisInput(
             query=query,
             memories=[
@@ -91,29 +90,15 @@ class OpenAICompatibleLLMClient:
             {"role": "user", "content": prompt_input.model_dump_json()},
         ]
         result = self._chat(messages)
+        safe_fallback = _safe_answer_fallback()
         raw_output = _parse_json_object(
             result.output.get("content", ""),
-            fallback={
-                "answer": memory_text,
-                "confidence": 0.4,
-                "used_memory_ids": [memory.memory_id for memory in memories],
-                "relevance_by_id": {
-                    memory.memory_id: "模型输出不可解析，使用候选记忆作为降级答案来源。"
-                    for memory in memories
-                },
-                "uncertainties": ["invalid_llm_output"],
-            },
+            fallback=safe_fallback,
         )
         try:
             output = AnswerSynthesisOutput.model_validate(raw_output)
         except ValidationError:
-            output = AnswerSynthesisOutput(
-                answer=str(raw_output.get("answer") or "当前 session 中没有足够记忆支持回答该问题。"),
-                confidence=0.6,
-                used_memory_ids=[],
-                relevance_by_id={},
-                uncertainties=["invalid_llm_output"],
-            )
+            output = AnswerSynthesisOutput.model_validate(safe_fallback)
         return LLMResult(output=output.model_dump(), input_tokens=result.input_tokens, output_tokens=result.output_tokens, model=result.model)
 
     def run_prompt(self, *, prompt_key: str, payload: dict) -> LLMResult:
@@ -153,6 +138,22 @@ def _parse_json_object(text: str, *, fallback: dict[str, Any]) -> dict[str, Any]
     except json.JSONDecodeError:
         return fallback
     return parsed if isinstance(parsed, dict) else fallback
+
+
+def _safe_answer_fallback() -> dict[str, Any]:
+    """构造 Answer Synthesizer 输出异常时的安全拒答结果。
+
+    Returns:
+        不引用任何候选记忆的固定拒答结构。
+    """
+
+    return {
+        "answer": "当前 session 中没有足够记忆支持回答该问题。",
+        "confidence": 0.1,
+        "used_memory_ids": [],
+        "relevance_by_id": {},
+        "uncertainties": ["invalid_llm_output"],
+    }
 
 
 def _estimate_tokens(text: str) -> int:

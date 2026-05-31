@@ -1,0 +1,64 @@
+{
+  "suite_id": "smoke_small",
+  "description": "Small deterministic MemoFlux recall eval suite for runner tests and local smoke checks.",
+  "defaults": {
+    "top_k": 6
+  },
+  "memories": [
+    {
+      "id": "atlas_old_delay",
+      "session": "{{session}}",
+      "content": "Atlas 项目延期，原因是数据库迁移回滚方案不完整。",
+      "occurred_at": "2026-05-01T10:00:00Z"
+    },
+    {
+      "id": "atlas_corrected_delay",
+      "session": "{{session}}",
+      "content": "Atlas 项目延期原因纠正为权限模型变更未完成安全评审，之前记录的数据库迁移回滚方案不再作为当前判断依据。",
+      "occurred_at": "2026-05-08T10:00:00Z"
+    },
+    {
+      "id": "zephyr_delay",
+      "session": "{{session}}",
+      "content": "Zephyr 项目延期，原因是前端构建缓存策略错误。",
+      "occurred_at": "2026-05-03T10:00:00Z"
+    },
+    {
+      "id": "atlas_history",
+      "session": "{{session}}",
+      "content": "Atlas 项目发布历史：第 1 次发布因订单索引回填校验失败暂停。",
+      "occurred_at": "2026-05-04T10:00:00Z"
+    }
+  ],
+  "queries": [
+    {
+      "id": "atlas_latest_delay",
+      "session": "{{session}}",
+      "kind": "latest_delay",
+      "query": "Atlas 当前延期原因是什么？",
+      "expected_answer_contains": ["权限模型变更未完成安全评审"],
+      "expected_reference_memory_ids": ["atlas_corrected_delay"],
+      "forbidden_answer_contains": ["Zephyr"],
+      "forbidden_reference_memory_ids": ["zephyr_delay"]
+    },
+    {
+      "id": "atlas_history",
+      "session": "{{session}}",
+      "kind": "history",
+      "query": "按历史记录总结 Atlas 发布暂停原因。",
+      "expected_answer_contains": ["订单索引回填校验失败"],
+      "expected_reference_memory_ids": ["atlas_history"],
+      "forbidden_answer_contains": ["Zephyr"],
+      "forbidden_reference_memory_ids": ["zephyr_delay"]
+    },
+    {
+      "id": "orion_no_evidence",
+      "session": "{{session}}",
+      "kind": "no_evidence",
+      "query": "Orion 当前延期原因是什么？",
+      "expect_no_evidence": true,
+      "forbidden_answer_contains": ["Atlas", "Zephyr"],
+      "forbidden_reference_memory_ids": ["atlas_old_delay", "atlas_corrected_delay", "zephyr_delay"]
+    }
+  ]
+}

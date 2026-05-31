@@ -51,6 +51,7 @@ class MemoFluxService:
         plan = self.llm_client.plan_query(query=query)
         rewritten_queries = plan.output.get("rewritten_queries") or [query]
         retrieval_queries = _build_retrieval_queries(query, rewritten_queries)
+        candidate_limit = _candidate_pool_limit(top_k)
         memory_batches = []
         for retrieval_query in retrieval_queries:
             query_embedding = LLMResult(output={"embedding": self.embedding_service.embed_text(retrieval_query)})
@@ -63,11 +64,11 @@ class MemoFluxService:
                 self.repository.search_memories(
                     session=session,
                     terms=set(),
-                    limit=top_k,
+                    limit=candidate_limit,
                     query_embedding=query_embedding.output.get("embedding"),
                 )
             )
-        memories = _merge_memories_by_id(memory_batches, limit=top_k)
+        memories = _merge_memories_by_id(memory_batches, limit=candidate_limit)
         query_type = str(plan.output.get("query_type") or "direct")
         if query_type in {"history", "temporal", "temporal_summary"}:
             memories.sort(key=lambda memory: memory.occurred_at)
@@ -301,6 +302,19 @@ def _merge_memories_by_id(memory_batches: list[list], *, limit: int) -> list:
             if len(merged) >= limit:
                 return merged
     return merged
+
+
+def _candidate_pool_limit(top_k: int) -> int:
+    """计算进入 Answer Synthesizer 的候选池大小。
+
+    Args:
+        top_k: API 请求的引用规模提示。
+
+    Returns:
+        扩大后的候选池大小，避免在语义判别前过早截断。
+    """
+
+    return max(top_k, min(top_k * 3, 60))
 
 
 def _audit_memory_item(memory) -> dict:

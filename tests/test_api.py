@@ -1,6 +1,9 @@
 from memoflux.api import create_app
 from memoflux.config import load_settings
-from memoflux.llm import LLMResult
+from datetime import UTC, datetime
+
+from memoflux.llm import LLMResult, OpenAICompatibleLLMClient
+from memoflux.models import MemoryRecord
 from memoflux.storage.memory import MemoryRepository
 
 
@@ -97,6 +100,50 @@ class RewrittenQueryLLMClient(FakeLLMClient):
             output_tokens=5,
             model="fake",
         )
+
+
+class CountingLLMClient(FakeLLMClient):
+    def __init__(self) -> None:
+        super().__init__()
+        self.synthesis_candidate_count = 0
+
+    def synthesize_answer(self, *, query: str, memories: list) -> LLMResult:
+        self.synthesis_candidate_count = len(memories)
+        return LLMResult(
+            output={
+                "answer": "只引用第三条记忆",
+                "confidence": 0.8,
+                "used_memory_ids": [memories[2].memory_id],
+                "relevance_by_id": {memories[2].memory_id: "第三条记忆提供答案。"},
+                "uncertainties": [],
+            },
+            input_tokens=20,
+            output_tokens=10,
+            model="fake",
+        )
+
+
+class ExpandedCandidateRepository(MemoryRepository):
+    def search_memories(self, *, session: str, terms: set[str], limit: int, query_embedding=None):
+        return [
+            MemoryRecord(
+                memory_id=f"m{index}",
+                session=session,
+                content=f"第 {index} 条 Atlas 记忆。",
+                occurred_at=datetime(2026, 5, index, 10, tzinfo=UTC),
+                created_at=datetime(2026, 5, index, 10, tzinfo=UTC),
+            )
+            for index in range(1, limit + 1)
+        ]
+
+
+class FakeChatLLMClient(OpenAICompatibleLLMClient):
+    def __init__(self, content: str) -> None:
+        super().__init__(base_url="http://unused", api_key="unused", model="fake")
+        self.content = content
+
+    def _chat(self, messages: list[dict[str, str]]) -> LLMResult:
+        return LLMResult(output={"content": self.content}, input_tokens=10, output_tokens=5, model="fake")
 
 
 
@@ -395,6 +442,73 @@ def test_recall_returns_empty_references_when_llm_uses_no_memories():
     assert data["references"] == []
     assert data["confidence"] == 0.0
     assert data["uncertainties"] == ["候选记忆未包含问题所需证据"]
+
+
+def test_openai_synthesizer_invalid_json_fails_closed():
+    llm_client = FakeChatLLMClient(content="not-json")
+    memory = MemoryRecord(
+        memory_id="m1",
+        session="s",
+        content="Hydra 项目外的候选记忆不应泄漏。",
+        occurred_at=datetime(2026, 5, 1, 10, tzinfo=UTC),
+        created_at=datetime(2026, 5, 1, 10, tzinfo=UTC),
+    )
+
+    result = llm_client.synthesize_answer(query="Hydra 当前延期原因是什么？", memories=[memory])
+
+    assert result.output == {
+        "answer": "当前 session 中没有足够记忆支持回答该问题。",
+        "confidence": 0.1,
+        "used_memory_ids": [],
+        "relevance_by_id": {},
+        "uncertainties": ["invalid_llm_output"],
+    }
+
+
+def test_openai_synthesizer_invalid_schema_fails_closed():
+    llm_client = FakeChatLLMClient(content='{"answer":"候选泄漏","confidence":"high","used_memory_ids":["m1"]}')
+    memory = MemoryRecord(
+        memory_id="m1",
+        session="s",
+        content="Hydra 项目外的候选记忆不应泄漏。",
+        occurred_at=datetime(2026, 5, 1, 10, tzinfo=UTC),
+        created_at=datetime(2026, 5, 1, 10, tzinfo=UTC),
+    )
+
+    result = llm_client.synthesize_answer(query="Hydra 当前延期原因是什么？", memories=[memory])
+
+    assert result.output == {
+        "answer": "当前 session 中没有足够记忆支持回答该问题。",
+        "confidence": 0.1,
+        "used_memory_ids": [],
+        "relevance_by_id": {},
+        "uncertainties": ["invalid_llm_output"],
+    }
+
+
+def test_recall_passes_expanded_candidate_pool_to_synthesizer():
+    llm_client = CountingLLMClient()
+    app = create_app(
+        repository=ExpandedCandidateRepository(),
+        llm_client=llm_client,
+        embedding_client=FakeEmbeddingService(),
+    )
+    from fastapi.testclient import TestClient
+
+    client = TestClient(app)
+    response = client.post("/v1/recall", json={"session": "s", "query": "Atlas?", "top_k": 2})
+
+    data = response.json()["data"]
+    assert response.status_code == 200
+    assert llm_client.synthesis_candidate_count == 6
+    assert data["references"] == [
+        {
+            "memory_id": "m3",
+            "occurred_at": "2026-05-03T10:00:00+00:00",
+            "quote": "第 3 条 Atlas 记忆。",
+            "relevance": "第三条记忆提供答案。",
+        }
+    ]
 
 
 def test_audits_return_persisted_recall_records():
