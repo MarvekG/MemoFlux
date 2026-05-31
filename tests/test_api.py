@@ -137,6 +137,62 @@ class ExpandedCandidateRepository(MemoryRepository):
         ]
 
 
+class HistoryOnlyListRepository(MemoryRepository):
+    def __init__(self) -> None:
+        super().__init__()
+        self.list_limits = []
+
+    def search_memories(self, *, session: str, terms: set[str], limit: int, query_embedding=None):
+        return [
+            MemoryRecord(
+                memory_id="vector-noise",
+                session=session,
+                content="Zephyr 项目延期，原因是前端构建缓存策略错误。",
+                occurred_at=datetime(2026, 5, 1, 10, tzinfo=UTC),
+                created_at=datetime(2026, 5, 1, 10, tzinfo=UTC),
+            )
+        ]
+
+    def list_memories(self, *, session: str, limit: int):
+        self.list_limits.append(limit)
+        return [
+            MemoryRecord(
+                memory_id="history-hit",
+                session=session,
+                content="Atlas 项目发布历史：第 1 次发布因订单索引回填校验失败暂停。",
+                occurred_at=datetime(2026, 5, 2, 10, tzinfo=UTC),
+                created_at=datetime(2026, 5, 2, 10, tzinfo=UTC),
+            )
+        ]
+
+
+class HistoryQueryLLMClient(FakeLLMClient):
+    def plan_query(self, *, query: str) -> LLMResult:
+        self.calls.append(("plan_query", query))
+        return LLMResult(
+            output={"query_type": "history", "rewritten_queries": [query]},
+            input_tokens=10,
+            output_tokens=5,
+            model="fake",
+        )
+
+    def synthesize_answer(self, *, query: str, memories: list) -> LLMResult:
+        self.calls.append(("synthesize_answer", query, [memory.memory_id for memory in memories]))
+        memory_ids = [memory.memory_id for memory in memories if memory.memory_id == "history-hit"]
+        return LLMResult(
+            output={
+                "answer": "订单索引回填校验失败。",
+                "confidence": 0.9,
+                "used_memory_ids": memory_ids,
+                "relevance_by_id": {memory_id: "该记忆提供 Atlas 发布暂停历史原因。" for memory_id in memory_ids},
+                "uncertainties": [],
+            },
+            input_tokens=20,
+            output_tokens=10,
+            model="fake",
+        )
+
+
 class FakeChatLLMClient(OpenAICompatibleLLMClient):
     def __init__(self, content: str) -> None:
         super().__init__(base_url="http://unused", api_key="unused", model="fake")
@@ -509,6 +565,23 @@ def test_recall_passes_expanded_candidate_pool_to_synthesizer():
             "relevance": "第三条记忆提供答案。",
         }
     ]
+
+
+def test_history_recall_includes_list_memory_pool_when_vector_misses():
+    llm_client = HistoryQueryLLMClient()
+    repository = HistoryOnlyListRepository()
+    app = create_app(repository=repository, llm_client=llm_client, embedding_client=FakeEmbeddingService())
+    from fastapi.testclient import TestClient
+
+    client = TestClient(app)
+    response = client.post("/v1/recall", json={"session": "s", "query": "按历史记录总结 Atlas 发布暂停原因。", "top_k": 2})
+
+    data = response.json()["data"]
+    assert response.status_code == 200
+    assert data["references"][0]["memory_id"] == "history-hit"
+    assert repository.list_limits == [6]
+    synthesis_call = llm_client.calls[-1]
+    assert synthesis_call == ("synthesize_answer", "按历史记录总结 Atlas 发布暂停原因。", ["vector-noise", "history-hit"])
 
 
 def test_audits_return_persisted_recall_records():

@@ -68,8 +68,10 @@ class MemoFluxService:
                     query_embedding=query_embedding.output.get("embedding"),
                 )
             )
-        memories = _merge_memories_by_id(memory_batches, limit=candidate_limit)
         query_type = str(plan.output.get("query_type") or "direct")
+        if query_type in {"history", "temporal", "temporal_summary", "summary"}:
+            memory_batches.append(self.repository.list_memories(session=session, limit=candidate_limit))
+        memories = _merge_memories_by_id(memory_batches, limit=candidate_limit)
         if query_type in {"history", "temporal", "temporal_summary"}:
             memories.sort(key=lambda memory: memory.occurred_at)
         self.repository.record_usage(operation="query_planner", input_tokens=plan.input_tokens, output_tokens=plan.output_tokens)
