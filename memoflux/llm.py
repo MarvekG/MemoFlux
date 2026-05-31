@@ -17,6 +17,8 @@ class LLMResult:
     output: dict[str, Any]
     input_tokens: int = 0
     output_tokens: int = 0
+    cached_tokens: int = 0
+    reasoning_tokens: int = 0
     model: str | None = None
 
 
@@ -76,7 +78,14 @@ class OpenAICompatibleLLMClient:
         output = QueryPlanOutput.model_validate(raw_output)
         if not output.rewritten_queries:
             output = QueryPlanOutput(query_type=output.query_type, rewritten_queries=[query])
-        return LLMResult(output=output.model_dump(), input_tokens=result.input_tokens, output_tokens=result.output_tokens, model=result.model)
+        return LLMResult(
+            output=output.model_dump(),
+            input_tokens=result.input_tokens,
+            output_tokens=result.output_tokens,
+            cached_tokens=result.cached_tokens,
+            reasoning_tokens=result.reasoning_tokens,
+            model=result.model,
+        )
 
     def synthesize_answer(self, *, query: str, memories: list, query_type: str = "direct") -> LLMResult:
         """调用真实 LLM 基于候选记忆整合答案。"""
@@ -109,7 +118,14 @@ class OpenAICompatibleLLMClient:
             output = AnswerSynthesisOutput.model_validate(raw_output)
         except ValidationError:
             output = AnswerSynthesisOutput.model_validate(safe_fallback)
-        return LLMResult(output=output.model_dump(), input_tokens=result.input_tokens, output_tokens=result.output_tokens, model=result.model)
+        return LLMResult(
+            output=output.model_dump(),
+            input_tokens=result.input_tokens,
+            output_tokens=result.output_tokens,
+            cached_tokens=result.cached_tokens,
+            reasoning_tokens=result.reasoning_tokens,
+            model=result.model,
+        )
 
     def run_prompt(self, *, prompt_key: str, payload: dict) -> LLMResult:
         """调用真实 LLM 执行 prompt 调试。"""
@@ -120,7 +136,14 @@ class OpenAICompatibleLLMClient:
         ]
         result = self._chat(messages)
         output = _parse_json_object(result.output.get("content", ""), fallback={"content": result.output.get("content", "")})
-        return LLMResult(output=output, input_tokens=result.input_tokens, output_tokens=result.output_tokens, model=result.model)
+        return LLMResult(
+            output=output,
+            input_tokens=result.input_tokens,
+            output_tokens=result.output_tokens,
+            cached_tokens=result.cached_tokens,
+            reasoning_tokens=result.reasoning_tokens,
+            model=result.model,
+        )
 
     def _chat(self, messages: list[dict[str, str]]) -> LLMResult:
         payload_data: dict[str, Any] = {"model": self.model, "messages": messages, "temperature": 0.0}
@@ -140,8 +163,39 @@ class OpenAICompatibleLLMClient:
             output={"content": content},
             input_tokens=int(usage.get("prompt_tokens") or 0),
             output_tokens=int(usage.get("completion_tokens") or 0),
+            cached_tokens=_cached_tokens_from_usage(usage),
+            reasoning_tokens=_reasoning_tokens_from_usage(usage),
             model=data.get("model") or self.model,
         )
+
+
+def _cached_tokens_from_usage(usage: dict[str, Any]) -> int:
+    """从 OpenAI-compatible usage 中提取缓存命中 token 数。
+
+    Args:
+        usage: Chat Completions 返回的 usage 对象。
+
+    Returns:
+        已缓存 prompt token 数；字段缺失时返回 0。
+    """
+
+    prompt_details = usage.get("prompt_tokens_details") or {}
+    return int(prompt_details.get("cached_tokens") or usage.get("cached_tokens") or 0)
+
+
+def _reasoning_tokens_from_usage(usage: dict[str, Any]) -> int:
+    """从 OpenAI-compatible usage 中提取 reasoning token 数。
+
+    Args:
+        usage: Chat Completions 返回的 usage 对象。
+
+    Returns:
+        reasoning token 数；字段缺失时返回 0。
+    """
+
+    completion_details = usage.get("completion_tokens_details") or {}
+    return int(completion_details.get("reasoning_tokens") or usage.get("reasoning_tokens") or 0)
+
 
 def _parse_json_object(text: str, *, fallback: dict[str, Any]) -> dict[str, Any]:
     try:

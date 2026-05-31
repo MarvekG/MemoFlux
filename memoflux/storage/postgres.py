@@ -46,6 +46,8 @@ class UsageRunRow(Base):
     operation: Mapped[str] = mapped_column(String, nullable=False)
     input_tokens: Mapped[int] = mapped_column(Integer, nullable=False)
     output_tokens: Mapped[int] = mapped_column(Integer, nullable=False)
+    cached_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    reasoning_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 
@@ -163,7 +165,15 @@ class PostgresMemoryRepository:
             rows = session.scalars(statement).all()
         return [_memory_from_row(row) for row in rows]
 
-    def record_usage(self, *, operation: str, input_tokens: int, output_tokens: int) -> None:
+    def record_usage(
+        self,
+        *,
+        operation: str,
+        input_tokens: int,
+        output_tokens: int,
+        cached_tokens: int = 0,
+        reasoning_tokens: int = 0,
+    ) -> None:
         """记录聚合 LLM 用量。"""
 
         row = UsageRunRow(
@@ -171,6 +181,8 @@ class PostgresMemoryRepository:
             operation=operation,
             input_tokens=input_tokens,
             output_tokens=output_tokens,
+            cached_tokens=cached_tokens,
+            reasoning_tokens=reasoning_tokens,
             created_at=datetime.now(tz=UTC),
         )
         with Session(self.engine) as session:
@@ -186,6 +198,8 @@ class PostgresMemoryRepository:
                 func.count(UsageRunRow.run_id),
                 func.sum(UsageRunRow.input_tokens),
                 func.sum(UsageRunRow.output_tokens),
+                func.sum(UsageRunRow.cached_tokens),
+                func.sum(UsageRunRow.reasoning_tokens),
             )
             .group_by(UsageRunRow.operation)
         )
@@ -196,11 +210,16 @@ class PostgresMemoryRepository:
                 "calls": int(calls or 0),
                 "input_tokens": int(input_tokens or 0),
                 "output_tokens": int(output_tokens or 0),
+                "cached_tokens": int(cached_tokens or 0),
+                "cache_miss_tokens": max(int(input_tokens or 0) - int(cached_tokens or 0), 0),
+                "reasoning_tokens": int(reasoning_tokens or 0),
             }
-            for operation, calls, input_tokens, output_tokens in rows
+            for operation, calls, input_tokens, output_tokens, cached_tokens, reasoning_tokens in rows
         }
         total_input = sum(item["input_tokens"] for item in by_operation.values())
         total_output = sum(item["output_tokens"] for item in by_operation.values())
+        total_cached = sum(item["cached_tokens"] for item in by_operation.values())
+        total_reasoning = sum(item["reasoning_tokens"] for item in by_operation.values())
         total_calls = sum(item["calls"] for item in by_operation.values())
         return UsageStats(
             llm_runs=total_calls,
@@ -208,10 +227,10 @@ class PostgresMemoryRepository:
             input_tokens=total_input,
             output_tokens=total_output,
             total_tokens=total_input + total_output,
-            cached_tokens=0,
-            cache_miss_tokens=total_input,
-            reasoning_tokens=0,
-            cache_hit_rate=0.0,
+            cached_tokens=total_cached,
+            cache_miss_tokens=max(total_input - total_cached, 0),
+            reasoning_tokens=total_reasoning,
+            cache_hit_rate=(total_cached / total_input) if total_input else 0.0,
             by_operation=by_operation,
         )
 

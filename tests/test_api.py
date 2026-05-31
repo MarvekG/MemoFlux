@@ -313,9 +313,11 @@ class CapturePayloadLLMClient(OpenAICompatibleLLMClient):
     def __init__(self) -> None:
         super().__init__(base_url="http://unused", api_key="unused", model="fake")
         self.payload = None
+        self.response_usage = {"prompt_tokens": 1, "completion_tokens": 1}
 
     def capture_urlopen(self, request, timeout):
         self.payload = __import__("json").loads(request.data.decode("utf-8"))
+        response_usage = self.response_usage
 
         class _Response:
             def __enter__(self):
@@ -325,7 +327,13 @@ class CapturePayloadLLMClient(OpenAICompatibleLLMClient):
                 return False
 
             def read(self):
-                return b'{"model":"fake","choices":[{"message":{"content":"{\\"query_type\\":\\"direct\\",\\"rewritten_queries\\":[\\"q\\"]}"}}],"usage":{"prompt_tokens":1,"completion_tokens":1}}'
+                return __import__("json").dumps(
+                    {
+                        "model": "fake",
+                        "choices": [{"message": {"content": '{"query_type":"direct","rewritten_queries":["q"]}'}}],
+                        "usage": response_usage,
+                    }
+                ).encode("utf-8")
 
         return _Response()
 
@@ -497,6 +505,21 @@ def test_usage_stats_are_aggregate_only():
     clear_response = client.delete("/v1/usage/stats")
     assert clear_response.status_code == 200
     assert clear_response.json()["data"]["deleted"] >= 1
+
+
+def test_usage_stats_include_cached_tokens_and_hit_rate():
+    repository = MemoryRepository()
+    repository.record_usage(operation="query_planner", input_tokens=100, output_tokens=20, cached_tokens=30)
+    repository.record_usage(operation="answer_synthesizer", input_tokens=50, output_tokens=10, cached_tokens=10)
+
+    stats = repository.usage_stats()
+
+    assert stats.input_tokens == 150
+    assert stats.cached_tokens == 40
+    assert stats.cache_miss_tokens == 110
+    assert stats.cache_hit_rate == 40 / 150
+    assert stats.by_operation["query_planner"]["cached_tokens"] == 30
+    assert stats.by_operation["query_planner"]["cache_miss_tokens"] == 70
 
 
 def test_recall_uses_configured_llm_without_returning_usage():
@@ -682,6 +705,24 @@ def test_openai_client_uses_deterministic_temperature():
 
     assert llm_client.payload is not None
     assert llm_client.payload["temperature"] == 0.0
+
+
+def test_openai_client_extracts_cached_and_reasoning_tokens():
+    llm_client = CapturePayloadLLMClient()
+    llm_client.response_usage = {
+        "prompt_tokens": 100,
+        "completion_tokens": 20,
+        "prompt_tokens_details": {"cached_tokens": 35},
+        "completion_tokens_details": {"reasoning_tokens": 7},
+    }
+
+    with patch("urllib.request.urlopen", llm_client.capture_urlopen):
+        result = llm_client.plan_query(query="q")
+
+    assert result.input_tokens == 100
+    assert result.output_tokens == 20
+    assert result.cached_tokens == 35
+    assert result.reasoning_tokens == 7
 
 
 def test_openai_client_injects_pydantic_schema_into_answer_synthesis_prompt():
@@ -928,6 +969,30 @@ def test_audits_return_selection_reasons():
     item = audits_response.json()["data"]["items"][0]
     selected_id = item["selected_memory_ids"][0]
     assert item["selection_reasons"] == {selected_id: "只引用第一条记忆。"}
+
+
+def test_audits_return_query_plan_fields():
+    llm_client = RewrittenQueryLLMClient()
+    app = create_app(repository=MemoryRepository(), llm_client=llm_client, embedding_client=FakeEmbeddingService())
+    from fastapi.testclient import TestClient
+
+    client = TestClient(app)
+    client.post(
+        "/v1/ingest",
+        json={"session": "s", "content": "Atlas 延期原因是数据库回滚风险。", "occurred_at": "2026-05-01T10:00:00Z"},
+    )
+    recall_response = client.post("/v1/recall", json={"session": "s", "query": "Atlas 为什么延期？"})
+    query_id = recall_response.json()["data"]["query_id"]
+
+    audits_response = client.get("/v1/audits", params={"session": "s", "query_id": query_id})
+
+    item = audits_response.json()["data"]["items"][0]
+    assert item["query"] == "Atlas 为什么延期？"
+    assert item["original_query"] == "Atlas 为什么延期？"
+    assert item["query_plan"] == {
+        "query_type": "direct",
+        "rewritten_queries": ["Atlas 延期原因", "Atlas 数据库回滚风险"],
+    }
 
 
 def test_audits_return_answerability_diagnostics():

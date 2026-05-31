@@ -32,6 +32,8 @@ class MemoFluxService:
             operation="embedding:ingest",
             input_tokens=embedding.input_tokens,
             output_tokens=embedding.output_tokens,
+            cached_tokens=embedding.cached_tokens,
+            reasoning_tokens=embedding.reasoning_tokens,
         )
         return self.repository.insert_memory(
             session=session,
@@ -59,6 +61,8 @@ class MemoFluxService:
                 operation="embedding:recall",
                 input_tokens=query_embedding.input_tokens,
                 output_tokens=query_embedding.output_tokens,
+                cached_tokens=query_embedding.cached_tokens,
+                reasoning_tokens=query_embedding.reasoning_tokens,
             )
             memory_batches.append(
                 self.repository.search_memories(
@@ -76,7 +80,13 @@ class MemoFluxService:
             memories.sort(key=lambda memory: memory.occurred_at)
         if _uses_newest_fact_order(query_type):
             memories.sort(key=lambda memory: memory.occurred_at, reverse=True)
-        self.repository.record_usage(operation="query_planner", input_tokens=plan.input_tokens, output_tokens=plan.output_tokens)
+        self.repository.record_usage(
+            operation="query_planner",
+            input_tokens=plan.input_tokens,
+            output_tokens=plan.output_tokens,
+            cached_tokens=plan.cached_tokens,
+            reasoning_tokens=plan.reasoning_tokens,
+        )
         if not memories:
             result = RecallResult(query_id=query_id, query_type="direct", answer=NO_ANSWER, references=[])
             self.repository.record_query_audit(
@@ -104,6 +114,8 @@ class MemoFluxService:
             operation="answer_synthesizer",
             input_tokens=synthesis.input_tokens,
             output_tokens=synthesis.output_tokens,
+            cached_tokens=synthesis.cached_tokens,
+            reasoning_tokens=synthesis.reasoning_tokens,
         )
         selection_reasons = _filter_selection_reasons(memories, synthesis.output.get("relevance_by_id") or {})
         used_memories = _filter_used_memories(memories, list(synthesis.output.get("used_memory_ids") or []))
@@ -171,6 +183,8 @@ class MemoFluxService:
                 operation="embedding:delete_dry_run",
                 input_tokens=query_embedding.input_tokens,
                 output_tokens=query_embedding.output_tokens,
+                cached_tokens=query_embedding.cached_tokens,
+                reasoning_tokens=query_embedding.reasoning_tokens,
             )
             candidates = self.repository.search_memories(
                 session=session,
@@ -179,7 +193,11 @@ class MemoFluxService:
                 query_embedding=query_embedding.output.get("embedding"),
             )
             matched = [memory.memory_id for memory in candidates]
-            self.repository.record_usage(operation="delete_dry_run", input_tokens=_estimate_tokens(query), output_tokens=0)
+            self.repository.record_usage(
+                operation="delete_dry_run",
+                input_tokens=_estimate_tokens(query),
+                output_tokens=0,
+            )
             self.repository.record_delete_audit(
                 DeleteAuditRecord(
                     delete_id=delete_id,

@@ -77,6 +77,8 @@ DELETE /v1/usage/stats
 
 Recall uses the original query plus LLM rewritten queries for vector retrieval, merges candidates by `memory_id`, and returns references only for `used_memory_ids` selected by the Answer Synthesizer. If the candidate memories do not support the question, the answer is `当前 session 中没有足够记忆支持回答该问题。` and references are empty.
 
+Query audits expose the validated planner output as `query`, `query_type`, `rewritten_queries`, and `query_plan`, while omitting prompts, raw provider responses, and single-call token usage. `/v1/usage/stats` returns aggregate token usage, including `cached_tokens`, `cache_miss_tokens`, `reasoning_tokens`, and `cache_hit_rate` for cache efficiency analysis.
+
 ## Run Tests
 
 ```bash

@@ -99,7 +99,13 @@ def create_app(*, repository=None, llm_client=None, embedding_client=None, datab
     @app.post("/v1/prompt-eval")
     def prompt_eval(request: PromptEvalRequest):
         result = service.llm_client.run_prompt(prompt_key=request.prompt_key, payload=request.payload)
-        service.repository.record_usage(operation=f"prompt_eval:{request.prompt_key}", input_tokens=result.input_tokens, output_tokens=result.output_tokens)
+        service.repository.record_usage(
+            operation=f"prompt_eval:{request.prompt_key}",
+            input_tokens=result.input_tokens,
+            output_tokens=result.output_tokens,
+            cached_tokens=result.cached_tokens,
+            reasoning_tokens=result.reasoning_tokens,
+        )
         return _ok({"status": "ok", "prompt_key": request.prompt_key, "model": result.model, "latency_ms": 0, "output": result.output, "error_code": None, "error_message": None})
 
     @app.get("/v1/health")
@@ -186,9 +192,14 @@ def _audit_payload(audit: QueryAuditRecord | DeleteAuditRecord) -> dict[str, Any
             "audit_type": "query",
             "query_id": audit.query_id,
             "session": audit.session,
+            "query": audit.original_query,
             "original_query": audit.original_query,
             "query_type": audit.query_type,
             "rewritten_queries": audit.rewritten_queries,
+            "query_plan": {
+                "query_type": audit.query_type,
+                "rewritten_queries": audit.rewritten_queries,
+            },
             "candidate_limit": audit.candidate_limit,
             "retrieved": audit.retrieved,
             "selected_memory_ids": audit.selected_memory_ids,
