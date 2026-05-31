@@ -51,6 +51,42 @@ def test_evaluate_recall_counts_correctness_and_noise():
     assert result["missing_reference_case_ids"] == []
 
 
+def test_evaluate_recall_reports_retrieval_and_selection_hits():
+    memory_id_map = {
+        "atlas_corrected_delay": "m-atlas-corrected",
+        "zephyr_delay": "m-zephyr",
+    }
+    query_case = {
+        "id": "atlas_latest_delay",
+        "kind": "latest_delay",
+        "expected_reference_memory_ids": ["atlas_corrected_delay"],
+    }
+    recall_data = {
+        "answer": "权限模型变更未完成安全评审。",
+        "confidence": 0.95,
+        "references": [
+            {
+                "memory_id": "m-atlas-corrected",
+                "quote": "Atlas 项目延期原因纠正为权限模型变更未完成安全评审。",
+            }
+        ],
+    }
+    audit = {
+        "retrieved": [
+            {"memory_id": "m-atlas-corrected", "content_preview": "Atlas 项目延期原因纠正为权限模型变更未完成安全评审。"},
+            {"memory_id": "m-zephyr", "content_preview": "Zephyr 项目延期。"},
+        ],
+        "selected_memory_ids": ["m-atlas-corrected"],
+    }
+
+    result = evaluate_recall(query_case, recall_data, memory_id_map, audit=audit)
+
+    assert result["retrieval_hit"] is True
+    assert result["selection_hit"] is True
+    assert result["missing_retrieved_case_ids"] == []
+    assert result["missing_selected_case_ids"] == []
+
+
 def test_evaluate_recall_validates_no_evidence_response():
     query_case = {
         "id": "orion_no_evidence",

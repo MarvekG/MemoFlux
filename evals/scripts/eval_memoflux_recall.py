@@ -35,13 +35,20 @@ def load_suite(path: Path) -> dict[str, Any]:
     return suite
 
 
-def evaluate_recall(query_case: dict[str, Any], recall_data: dict[str, Any], memory_id_map: dict[str, str]) -> dict[str, Any]:
+def evaluate_recall(
+    query_case: dict[str, Any],
+    recall_data: dict[str, Any],
+    memory_id_map: dict[str, str],
+    *,
+    audit: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     """评估单条 recall 结果。
 
     Args:
         query_case: JSON 评测套中的查询用例。
         recall_data: `/v1/recall` 返回的 data 字段。
         memory_id_map: 评测 memory case id 到实际 memory_id 的映射。
+        audit: 可选 query audit，用于计算 retrieval/selection 分阶段命中。
 
     Returns:
         包含正确性、噪声和缺失项的评估结果。
@@ -56,6 +63,10 @@ def evaluate_recall(query_case: dict[str, Any], recall_data: dict[str, Any], mem
     forbidden_answer_terms = [term for term in query_case.get("forbidden_answer_contains", []) if str(term) in answer]
     missing_reference_ids = [memory_id for memory_id in expected_reference_ids if memory_id not in reference_ids]
     noisy_reference_ids = [memory_id for memory_id in forbidden_reference_ids if memory_id in reference_ids]
+    retrieved_ids = {str(item.get("memory_id")) for item in (audit or {}).get("retrieved", [])}
+    selected_ids = {str(memory_id) for memory_id in (audit or {}).get("selected_memory_ids", [])}
+    missing_retrieved_ids = [memory_id for memory_id in expected_reference_ids if audit is not None and memory_id not in retrieved_ids]
+    missing_selected_ids = [memory_id for memory_id in expected_reference_ids if audit is not None and memory_id not in selected_ids]
     no_evidence_correct = None
     if query_case.get("expect_no_evidence"):
         no_evidence_correct = (
@@ -77,6 +88,10 @@ def evaluate_recall(query_case: dict[str, Any], recall_data: dict[str, Any], mem
         "forbidden_answer_terms": forbidden_answer_terms,
         "missing_reference_case_ids": _memory_ids_to_case_ids(missing_reference_ids, memory_id_map),
         "noisy_reference_case_ids": _memory_ids_to_case_ids(noisy_reference_ids, memory_id_map),
+        "retrieval_hit": None if audit is None else not missing_retrieved_ids,
+        "selection_hit": None if audit is None else not missing_selected_ids,
+        "missing_retrieved_case_ids": _memory_ids_to_case_ids(missing_retrieved_ids, memory_id_map),
+        "missing_selected_case_ids": _memory_ids_to_case_ids(missing_selected_ids, memory_id_map),
         "answer": answer,
         "confidence": recall_data.get("confidence"),
         "reference_count": len(references),
@@ -112,7 +127,9 @@ def run_suite(*, suite_path: Path, base_url: str, session: str | None = None) ->
         status, body = _request(base_url, "POST", "/v1/recall", payload)
         if status != 200:
             raise RuntimeError(f"recall failed for {query_case.get('id')}: {body}")
-        details.append(evaluate_recall(query_case, body["data"], memory_id_map))
+        query_id = str(body["data"].get("query_id") or "")
+        audit = _load_query_audit(base_url=base_url, session=eval_session, query_id=query_id)
+        details.append(evaluate_recall(query_case, body["data"], memory_id_map, audit=audit))
     metrics = _aggregate(details)
     return {
         "suite_id": suite["suite_id"],
@@ -150,6 +167,27 @@ def _request(base_url: str, method: str, path: str, payload: dict[str, Any]) -> 
     )
     with urllib.request.urlopen(request, timeout=300) as response:
         return response.status, json.loads(response.read().decode("utf-8"))
+
+
+def _load_query_audit(*, base_url: str, session: str, query_id: str) -> dict[str, Any] | None:
+    """读取单条 query audit。
+
+    Args:
+        base_url: MemoFlux 服务地址。
+        session: 当前评测 session。
+        query_id: recall 响应中的 query_id。
+
+    Returns:
+        找到时返回 query audit，否则返回 None。
+    """
+
+    if not query_id:
+        return None
+    status, body = _request(base_url, "GET", "/v1/audits", {"session": session, "query_id": query_id})
+    if status != 200:
+        return None
+    items = body.get("data", {}).get("items", [])
+    return items[0] if items else None
 
 
 def _render_templates(value: Any, session: str) -> Any:
@@ -194,6 +232,8 @@ def _aggregate(details: list[dict[str, Any]]) -> dict[str, Any]:
         "answer_noise_count": sum(int(bool(detail["answer_noise"])) for detail in details),
         "ref_noise_count": sum(int(bool(detail["ref_noise"])) for detail in details),
         "no_evidence_correct": sum(int(detail["no_evidence_correct"] is True) for detail in details),
+        "retrieval_hit_count": sum(int(detail["retrieval_hit"] is True) for detail in details),
+        "selection_hit_count": sum(int(detail["selection_hit"] is True) for detail in details),
     }
 
 
