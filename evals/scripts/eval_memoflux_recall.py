@@ -74,13 +74,14 @@ def evaluate_recall(
             and not references
             and _safe_float(recall_data.get("confidence")) <= 0.3
         )
-    correct = bool(no_evidence_correct) if no_evidence_correct is not None else not missing_answer_terms and not missing_reference_ids
+    answer_correct = bool(no_evidence_correct) if no_evidence_correct is not None else not missing_answer_terms
     answer_noise = bool(forbidden_answer_terms)
     ref_noise = bool(noisy_reference_ids)
     return {
         "query_id": query_case.get("id"),
         "kind": query_case.get("kind", "unknown"),
-        "correct": correct and not answer_noise and not ref_noise,
+        "correct": answer_correct and not answer_noise and not ref_noise,
+        "answer_correct": answer_correct,
         "no_evidence_correct": no_evidence_correct,
         "answer_noise": answer_noise,
         "ref_noise": ref_noise,

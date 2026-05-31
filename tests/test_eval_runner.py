@@ -45,6 +45,7 @@ def test_evaluate_recall_counts_correctness_and_noise():
     result = evaluate_recall(query_case, recall_data, memory_id_map)
 
     assert result["correct"] is True
+    assert result["answer_correct"] is True
     assert result["answer_noise"] is False
     assert result["ref_noise"] is False
     assert result["missing_answer_terms"] == []
@@ -85,6 +86,31 @@ def test_evaluate_recall_reports_retrieval_and_selection_hits():
     assert result["selection_hit"] is True
     assert result["missing_retrieved_case_ids"] == []
     assert result["missing_selected_case_ids"] == []
+
+
+def test_evaluate_recall_keeps_answer_correct_separate_from_selection_hit():
+    memory_id_map = {
+        "expected_correction": "m-expected",
+        "equivalent_correction": "m-equivalent",
+    }
+    query_case = {
+        "id": "latest_delay",
+        "kind": "latest_delay",
+        "expected_answer_contains": ["行情数据清洗规则冲突"],
+        "expected_reference_memory_ids": ["expected_correction"],
+    }
+    recall_data = {
+        "answer": "行情数据清洗规则冲突",
+        "confidence": 0.95,
+        "references": [{"memory_id": "m-equivalent", "quote": "等价纠错记忆"}],
+    }
+
+    result = evaluate_recall(query_case, recall_data, memory_id_map)
+
+    assert result["answer_correct"] is True
+    assert result["selection_hit"] is None
+    assert result["correct"] is True
+    assert result["missing_reference_case_ids"] == ["expected_correction"]
 
 
 def test_evaluate_recall_validates_no_evidence_response():

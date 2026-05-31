@@ -86,7 +86,7 @@ class OpenAICompatibleLLMClient:
         messages = [
             {
                 "role": "system",
-                "content": "你是 MemoFlux 答案整合器。只能基于给定记忆回答。先判断候选记忆是否真正回答问题以及是否与问题主体一致；不要猜测。query_type 表示查询意图：direct/single/single_hop 类问题是普通事实查询，候选记忆直接回答问题时必须作答；history/summary/temporal 类问题需要总结候选中的历史事件，不要按当前事实查询的标准拒答。只输出 JSON：answer、confidence、used_memory_ids、relevance_by_id、uncertainties。confidence 必须是 0 到 1 的数字。used_memory_ids 必须来自候选 memory_id。relevance_by_id 的 key 必须来自候选 memory_id，value 用一句话说明为什么该记忆支持答案。如果候选没有足够证据回答问题，answer 必须是：当前 session 中没有足够记忆支持回答该问题。confidence 设为 0 到 0.3，used_memory_ids 返回空数组。",
+                "content": "你是 MemoFlux 答案整合器。只能基于给定记忆回答。先判断候选记忆是否真正回答问题以及是否与问题主体一致；不要猜测，不要用其他主体的候选回答当前主体的问题。query_type 表示查询意图：direct/single/single_hop/factual 类问题是普通事实查询，候选记忆直接回答问题时必须作答；如果问题询问当前/最新事实，候选中表达纠正、更新、改为、之前记录不再作为当前判断依据的记忆就是当前事实证据，必须优先使用。history/summary/temporal 类问题需要总结候选中的历史事件，不要按当前事实查询的标准拒答。只输出 JSON：answer、confidence、used_memory_ids、relevance_by_id、uncertainties。confidence 必须是 0 到 1 的数字。used_memory_ids 必须来自候选 memory_id。relevance_by_id 的 key 必须来自候选 memory_id，value 用一句话说明为什么该记忆支持答案。如果候选没有足够证据回答问题，answer 必须是：当前 session 中没有足够记忆支持回答该问题。confidence 设为 0 到 0.3，used_memory_ids 返回空数组。",
             },
             {"role": "user", "content": prompt_input.model_dump_json()},
         ]
