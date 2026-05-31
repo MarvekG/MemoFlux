@@ -28,7 +28,7 @@ class LocalLLMClient:
     def plan_query(self, *, query: str) -> LLMResult:
         """生成本地 query plan。"""
 
-        output = QueryPlanOutput(query_type="direct", rewritten_queries=[query])
+        output = QueryPlanOutput(rewritten_queries=[query])
         return LLMResult(output=output.model_dump(), input_tokens=_estimate_tokens(query), output_tokens=4, model="local")
 
     def synthesize_answer(self, *, query: str, memories: list) -> LLMResult:
@@ -65,19 +65,20 @@ class OpenAICompatibleLLMClient:
         prompt_input = QueryPlanInput(query=query)
         messages = [
             {
-                "role": "system",
-                "content": _with_output_schema(
-                    "你是 MemoFlux 查询规划器。只输出 JSON：query_type 和 rewritten_queries。",
+                    "role": "system",
+                    "content": _with_output_schema(
+                    "你是 MemoFlux 查询规划器。只输出 JSON：rewritten_queries。"
+                    "rewritten_queries 应表达适合检索的语义改写；复杂问题可拆成多条检索 query。",
                     QueryPlanOutput,
                 ),
             },
             {"role": "user", "content": prompt_input.model_dump_json()},
         ]
         result = self._chat(messages)
-        raw_output = _parse_json_object(result.output.get("content", ""), fallback={"query_type": "direct", "rewritten_queries": [query]})
+        raw_output = _parse_json_object(result.output.get("content", ""), fallback={"rewritten_queries": [query]})
         output = QueryPlanOutput.model_validate(raw_output)
         if not output.rewritten_queries:
-            output = QueryPlanOutput(query_type=output.query_type, rewritten_queries=[query])
+            output = QueryPlanOutput(rewritten_queries=[query])
         return LLMResult(
             output=output.model_dump(),
             input_tokens=result.input_tokens,
@@ -87,12 +88,11 @@ class OpenAICompatibleLLMClient:
             model=result.model,
         )
 
-    def synthesize_answer(self, *, query: str, memories: list, query_type: str = "direct") -> LLMResult:
+    def synthesize_answer(self, *, query: str, memories: list) -> LLMResult:
         """调用真实 LLM 基于候选记忆整合答案。"""
 
         prompt_input = AnswerSynthesisInput(
             query=query,
-            query_type=query_type,
             memories=[
                 {"memory_id": memory.memory_id, "content": memory.content, "occurred_at": memory.occurred_at}
                 for memory in memories
@@ -102,7 +102,7 @@ class OpenAICompatibleLLMClient:
             {
                 "role": "system",
                 "content": _with_output_schema(
-                    "你是 MemoFlux 答案整合器。只能基于给定记忆回答，不要猜测，不要用其他主体的候选回答当前主体的问题。请按以下顺序判断：1. 识别问题主体和问题要问的事实。2. 在候选中找主体一致、能直接回答该事实的记忆。3. 如果存在这样的记忆，即使只有一条，也必须回答，并把 answerability 设为 answerable。4. 只有在候选中没有任何主体一致且能直接回答问题的记忆时，才允许拒答，并把 answerability 设为 not_answerable。当前/最新事实规则：如果问题询问当前或最新事实，候选中表达“纠正为/更新为/改为/之前记录不再作为当前判断依据”的记忆就是当前事实证据，必须优先使用。当前依赖规则：dependency/dependency_risk/dependency_analysis/association/current_association 类问题询问当前依赖或依赖风险时，候选中明确写出“当前依赖 ... 服务，依赖风险是 ...，之前依赖记录不再作为当前判断依据”的记忆就是当前依赖证据；如果有多条主体一致的当前依赖证据，必须使用 occurred_at 最新的一条，不要使用更早的当前依赖记录。历史依赖规则：association_history 或询问“历史上依赖过哪些服务”的问题，必须汇总候选中所有主体一致且描述依赖/当前依赖的记忆，不能因为其中写了“当前依赖”就排除在历史之外；答案应列全这些服务并引用对应记忆。历史规则：history/summary/temporal/association_history 类问题需要总结候选中的历史事件，不要按当前事实查询的标准拒答。输出必须是 JSON，字段包括 answer、confidence、used_memory_ids、relevance_by_id、answerability、answerability_reason、uncertainties。confidence 必须是 0 到 1 的数字。used_memory_ids 必须来自候选 memory_id。relevance_by_id 的 key 必须来自候选 memory_id，value 用一句话说明为什么该记忆支持答案。answerability_reason 用一句话说明为什么可答或不可答。如果不可答，answer 必须是：当前 session 中没有足够记忆支持回答该问题。confidence 设为 0 到 0.3，used_memory_ids 返回空数组。",
+                    "你是 MemoFlux 答案整合器。只能基于给定记忆回答，不要猜测，不要用其他主体的候选回答当前主体的问题。请按以下顺序判断：1. 识别问题主体和问题要问的事实。2. 在候选中找主体一致、能直接回答该事实的记忆。3. 如果存在这样的记忆，即使只有一条，也必须回答，并把 answerability 设为 answerable。4. 只有在候选中没有任何主体一致且能直接回答问题的记忆时，才允许拒答，并把 answerability 设为 not_answerable。当前/最新事实规则：如果问题询问当前或最新事实，候选中表达“纠正为/更新为/改为/之前记录不再作为当前判断依据”的记忆就是当前事实证据，必须优先使用；如果有多条主体一致的当前事实证据，必须逐条比较 occurred_at，使用时间最新的一条，不要把候选顺序、相似度或较早日期误判为最新。当前依赖规则：问题询问当前依赖或依赖风险时，候选中明确写出“当前依赖 ... 服务，依赖风险是 ...，之前依赖记录不再作为当前判断依据”的记忆就是当前依赖证据；如果有多条主体一致的当前依赖证据，必须逐条比较 occurred_at 并使用时间最新的一条，不要使用更早的当前依赖记录。历史依赖规则：询问“历史上依赖过哪些服务”的问题，必须汇总候选中所有主体一致且描述依赖/当前依赖的记忆，不能因为其中写了“当前依赖”就排除在历史之外；答案应列全这些服务并引用对应记忆。历史规则：询问历史、总结、变化过程的问题需要总结候选中的历史事件，不要按当前事实查询的标准拒答。输出必须是 JSON，字段包括 answer、confidence、used_memory_ids、relevance_by_id、answerability、answerability_reason、uncertainties。confidence 必须是 0 到 1 的数字。used_memory_ids 必须来自候选 memory_id。relevance_by_id 的 key 必须来自候选 memory_id，value 用一句话说明为什么该记忆支持答案。answerability_reason 用一句话说明为什么可答或不可答。如果不可答，answer 必须是：当前 session 中没有足够记忆支持回答该问题。confidence 设为 0 到 0.3，used_memory_ids 返回空数组。",
                     AnswerSynthesisOutput,
                 ),
             },

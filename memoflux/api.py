@@ -75,7 +75,6 @@ def create_app(*, repository=None, llm_client=None, embedding_client=None, datab
         result = service.recall(session=request.session, query=request.query, top_k=request.top_k)
         payload = {
             "query_id": result.query_id,
-            "query_type": result.query_type,
             "answer": result.answer,
             "references": [_reference_payload(item) for item in result.references] if request.include_references else [],
             "confidence": result.confidence,
@@ -194,10 +193,8 @@ def _audit_payload(audit: QueryAuditRecord | DeleteAuditRecord) -> dict[str, Any
             "session": audit.session,
             "query": audit.original_query,
             "original_query": audit.original_query,
-            "query_type": audit.query_type,
             "rewritten_queries": audit.rewritten_queries,
             "query_plan": {
-                "query_type": audit.query_type,
                 "rewritten_queries": audit.rewritten_queries,
             },
             "candidate_limit": audit.candidate_limit,

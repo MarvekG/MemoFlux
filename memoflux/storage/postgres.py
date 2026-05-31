@@ -60,7 +60,6 @@ class QueryAuditRow(Base):
     query_id: Mapped[str] = mapped_column(String, primary_key=True)
     session: Mapped[str] = mapped_column(String, nullable=False)
     original_query: Mapped[str] = mapped_column(Text, nullable=False)
-    query_type: Mapped[str] = mapped_column(String, nullable=False)
     rewritten_queries: Mapped[list] = mapped_column(JSON, nullable=False)
     candidate_limit: Mapped[int] = mapped_column(Integer, nullable=False)
     retrieved: Mapped[list] = mapped_column(JSON, nullable=False)
@@ -344,7 +343,6 @@ def _query_audit_from_row(row: QueryAuditRow) -> QueryAuditRecord:
         query_id=row.query_id,
         session=row.session,
         original_query=row.original_query,
-        query_type=row.query_type,
         rewritten_queries=list(row.rewritten_queries or []),
         candidate_limit=row.candidate_limit,
         retrieved=list(row.retrieved or []),

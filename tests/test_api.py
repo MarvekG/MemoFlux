@@ -1,4 +1,5 @@
 from datetime import UTC, datetime
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from memoflux.api import create_app
@@ -16,7 +17,7 @@ class FakeLLMClient:
     def plan_query(self, *, query: str) -> LLMResult:
         self.calls.append(("plan_query", query))
         return LLMResult(
-            output={"query_type": "direct", "rewritten_queries": [query]},
+            output={"rewritten_queries": [query]},
             input_tokens=10,
             output_tokens=5,
             model="fake",
@@ -116,7 +117,7 @@ class RewrittenQueryLLMClient(FakeLLMClient):
     def plan_query(self, *, query: str) -> LLMResult:
         self.calls.append(("plan_query", query))
         return LLMResult(
-            output={"query_type": "direct", "rewritten_queries": ["Atlas 延期原因", "Atlas 数据库回滚风险"]},
+            output={"rewritten_queries": ["Atlas 延期原因", "Atlas 数据库回滚风险"]},
             input_tokens=10,
             output_tokens=5,
             model="fake",
@@ -145,7 +146,7 @@ class CountingLLMClient(FakeLLMClient):
 
 
 class AuditCountingLLMClient(CountingLLMClient):
-    def synthesize_answer(self, *, query: str, memories: list, query_type: str = "direct") -> LLMResult:
+    def synthesize_answer(self, *, query: str, memories: list) -> LLMResult:
         self.synthesis_candidate_count = len(memories)
         return LLMResult(
             output={
@@ -157,38 +158,6 @@ class AuditCountingLLMClient(CountingLLMClient):
             },
             input_tokens=20,
             output_tokens=10,
-            model="fake",
-        )
-
-
-class CaptureMemoryOrderLLMClient(FakeLLMClient):
-    def __init__(self, query_type: str) -> None:
-        super().__init__()
-        self.query_type = query_type
-        self.captured_memory_ids: list[str] = []
-
-    def plan_query(self, *, query: str) -> LLMResult:
-        return LLMResult(
-            output={"query_type": self.query_type, "rewritten_queries": [query]},
-            input_tokens=1,
-            output_tokens=1,
-            model="fake",
-        )
-
-    def synthesize_answer(self, *, query: str, memories: list, query_type: str = "direct") -> LLMResult:
-        self.captured_memory_ids = [memory.memory_id for memory in memories]
-        return LLMResult(
-            output={
-                "answer": "captured",
-                "confidence": 0.8,
-                "used_memory_ids": [memories[0].memory_id],
-                "relevance_by_id": {memories[0].memory_id: "第一条候选用于答案。"},
-                "answerability": "answerable",
-                "answerability_reason": "测试捕获候选顺序。",
-                "uncertainties": [],
-            },
-            input_tokens=1,
-            output_tokens=1,
             model="fake",
         )
 
@@ -267,7 +236,7 @@ class HistoryQueryLLMClient(FakeLLMClient):
     def plan_query(self, *, query: str) -> LLMResult:
         self.calls.append(("plan_query", query))
         return LLMResult(
-            output={"query_type": "history", "rewritten_queries": [query]},
+            output={"rewritten_queries": [query]},
             input_tokens=10,
             output_tokens=5,
             model="fake",
@@ -288,16 +257,6 @@ class HistoryQueryLLMClient(FakeLLMClient):
             output_tokens=10,
             model="fake",
         )
-
-
-class CaptureQueryTypeLLMClient(HistoryQueryLLMClient):
-    def __init__(self) -> None:
-        super().__init__()
-        self.captured_query_type = None
-
-    def synthesize_answer(self, *, query: str, memories: list, query_type: str = "direct") -> LLMResult:
-        self.captured_query_type = query_type
-        return super().synthesize_answer(query=query, memories=memories)
 
 
 class FakeChatLLMClient(OpenAICompatibleLLMClient):
@@ -330,7 +289,7 @@ class CapturePayloadLLMClient(OpenAICompatibleLLMClient):
                 return __import__("json").dumps(
                     {
                         "model": "fake",
-                        "choices": [{"message": {"content": '{"query_type":"direct","rewritten_queries":["q"]}'}}],
+                        "choices": [{"message": {"content": '{"rewritten_queries":["q"]}'}}],
                         "usage": response_usage,
                     }
                 ).encode("utf-8")
@@ -746,7 +705,7 @@ def test_openai_client_injects_pydantic_schema_into_answer_synthesis_prompt():
     assert "JSON Schema" in system_prompt
 
 
-def test_openai_client_injects_pydantic_schema_into_query_plan_prompt():
+def test_openai_client_injects_rewrite_only_schema_into_query_plan_prompt():
     llm_client = CapturePayloadLLMClient()
 
     with patch("urllib.request.urlopen", llm_client.capture_urlopen):
@@ -756,11 +715,12 @@ def test_openai_client_injects_pydantic_schema_into_query_plan_prompt():
     assert "response_format" not in llm_client.payload
     system_prompt = llm_client.payload["messages"][0]["content"]
     assert "QueryPlanOutput" in system_prompt
-    assert "query_type" in system_prompt
+    assert "rewritten_queries" in system_prompt
+    assert "query_type" not in system_prompt
     assert "JSON Schema" in system_prompt
 
 
-def test_direct_recall_audits_expanded_pool_but_synthesizes_top_k_candidates():
+def test_recall_uses_expanded_pool_for_audit_and_synthesis():
     llm_client = AuditCountingLLMClient()
     repository = ExpandedCandidateRepository()
     app = create_app(
@@ -789,110 +749,6 @@ def test_direct_recall_audits_expanded_pool_but_synthesizes_top_k_candidates():
     ]
 
 
-def test_history_recall_passes_expanded_candidate_pool_to_synthesizer():
-    llm_client = CountingLLMClient()
-    llm_client.plan_query = lambda *, query: LLMResult(
-        output={"query_type": "history", "rewritten_queries": [query]}, input_tokens=1, output_tokens=1, model="fake"
-    )
-    app = create_app(
-        repository=ExpandedCandidateRepository(),
-        llm_client=llm_client,
-        embedding_client=FakeEmbeddingService(),
-    )
-    from fastapi.testclient import TestClient
-
-    client = TestClient(app)
-    response = client.post("/v1/recall", json={"session": "s", "query": "Atlas?", "top_k": 2})
-
-    data = response.json()["data"]
-    assert response.status_code == 200
-    assert llm_client.synthesis_candidate_count == 6
-    assert data["references"] == [
-        {
-            "memory_id": "m3",
-            "occurred_at": "2026-05-03T10:00:00+00:00",
-            "quote": "第 3 条 Atlas 记忆。",
-            "relevance": "第三条记忆提供答案。",
-        }
-    ]
-
-
-def test_association_recall_passes_expanded_candidate_pool_to_synthesizer():
-    llm_client = CountingLLMClient()
-    llm_client.plan_query = lambda *, query: LLMResult(
-        output={"query_type": "association", "rewritten_queries": [query]}, input_tokens=1, output_tokens=1, model="fake"
-    )
-    app = create_app(
-        repository=ExpandedCandidateRepository(),
-        llm_client=llm_client,
-        embedding_client=FakeEmbeddingService(),
-    )
-    from fastapi.testclient import TestClient
-
-    client = TestClient(app)
-    response = client.post("/v1/recall", json={"session": "s", "query": "Atlas 当前依赖哪个服务？", "top_k": 2})
-
-    assert response.status_code == 200
-    assert llm_client.synthesis_candidate_count == 6
-
-
-def test_dependency_risk_recall_passes_expanded_candidate_pool_to_synthesizer():
-    llm_client = CountingLLMClient()
-    llm_client.plan_query = lambda *, query: LLMResult(
-        output={"query_type": "dependency_risk", "rewritten_queries": [query]}, input_tokens=1, output_tokens=1, model="fake"
-    )
-    app = create_app(
-        repository=ExpandedCandidateRepository(),
-        llm_client=llm_client,
-        embedding_client=FakeEmbeddingService(),
-    )
-    from fastapi.testclient import TestClient
-
-    client = TestClient(app)
-    response = client.post("/v1/recall", json={"session": "s", "query": "Atlas 当前依赖风险是什么？", "top_k": 2})
-
-    assert response.status_code == 200
-    assert llm_client.synthesis_candidate_count == 6
-
-
-def test_dependency_analysis_recall_passes_expanded_candidate_pool_to_synthesizer():
-    llm_client = CountingLLMClient()
-    llm_client.plan_query = lambda *, query: LLMResult(
-        output={"query_type": "dependency_analysis", "rewritten_queries": [query]},
-        input_tokens=1,
-        output_tokens=1,
-        model="fake",
-    )
-    app = create_app(
-        repository=ExpandedCandidateRepository(),
-        llm_client=llm_client,
-        embedding_client=FakeEmbeddingService(),
-    )
-    from fastapi.testclient import TestClient
-
-    client = TestClient(app)
-    response = client.post("/v1/recall", json={"session": "s", "query": "Atlas 当前依赖分析是什么？", "top_k": 2})
-
-    assert response.status_code == 200
-    assert llm_client.synthesis_candidate_count == 6
-
-
-def test_current_dependency_candidates_prioritize_newer_current_facts():
-    llm_client = CaptureMemoryOrderLLMClient(query_type="dependency_risk")
-    app = create_app(
-        repository=DependencyCandidateRepository(),
-        llm_client=llm_client,
-        embedding_client=FakeEmbeddingService(),
-    )
-    from fastapi.testclient import TestClient
-
-    client = TestClient(app)
-    response = client.post("/v1/recall", json={"session": "s", "query": "Falcon 当前依赖哪个服务？", "top_k": 3})
-
-    assert response.status_code == 200
-    assert llm_client.captured_memory_ids[:3] == ["newer-current", "older-current", "older-history"]
-
-
 def test_history_recall_includes_list_memory_pool_when_vector_misses():
     llm_client = HistoryQueryLLMClient()
     repository = HistoryOnlyListRepository()
@@ -908,20 +764,6 @@ def test_history_recall_includes_list_memory_pool_when_vector_misses():
     assert repository.list_limits == [6]
     synthesis_call = llm_client.calls[-1]
     assert synthesis_call == ("synthesize_answer", "按历史记录总结 Atlas 发布暂停原因。", ["vector-noise", "history-hit"])
-
-
-def test_recall_passes_query_type_to_answer_synthesizer():
-    llm_client = CaptureQueryTypeLLMClient()
-    app = create_app(repository=HistoryOnlyListRepository(), llm_client=llm_client, embedding_client=FakeEmbeddingService())
-    from fastapi.testclient import TestClient
-
-    client = TestClient(app)
-    response = client.post("/v1/recall", json={"session": "s", "query": "按历史记录总结 Atlas 发布暂停原因。", "top_k": 2})
-
-    assert response.status_code == 200
-    assert llm_client.captured_query_type == "history"
-
-
 def test_audits_return_persisted_recall_records():
     llm_client = FakeLLMClient()
     app = create_app(repository=MemoryRepository(), llm_client=llm_client, embedding_client=FakeEmbeddingService())
@@ -948,7 +790,7 @@ def test_audits_return_persisted_recall_records():
     assert items[0]["query_id"] == query_id
     assert items[0]["session"] == "project:atlas"
     assert items[0]["original_query"] == "Atlas 为什么延期？"
-    assert items[0]["query_type"] == "direct"
+    assert "query_type" not in items[0]
     assert items[0]["selected_memory_ids"]
     assert items[0]["final_answer"].startswith("LLM 整合答案")
     assert "llm_usage" not in items[0]
@@ -990,7 +832,6 @@ def test_audits_return_query_plan_fields():
     assert item["query"] == "Atlas 为什么延期？"
     assert item["original_query"] == "Atlas 为什么延期？"
     assert item["query_plan"] == {
-        "query_type": "direct",
         "rewritten_queries": ["Atlas 延期原因", "Atlas 数据库回滚风险"],
     }
 
@@ -1173,6 +1014,32 @@ def test_answer_synthesis_output_accepts_answerability_diagnostics():
 
     assert output.answerability == "answerable"
     assert output.answerability_reason == "候选记忆主体一致，并明确给出当前依赖。"
+
+
+def test_postgres_query_audit_mapping_does_not_require_query_type():
+    from memoflux.storage.postgres import _query_audit_from_row
+
+    row = SimpleNamespace(
+        query_id="q1",
+        session="s",
+        original_query="Atlas 为什么延期？",
+        rewritten_queries=["Atlas 延期原因"],
+        candidate_limit=12,
+        retrieved=[],
+        selected_memory_ids=[],
+        selection_reasons={},
+        final_answer="answer",
+        status="ok",
+        error_stage=None,
+        error_message=None,
+        created_at=datetime(2026, 5, 1, 10, tzinfo=UTC),
+    )
+
+    audit = _query_audit_from_row(row)
+
+    assert audit.original_query == "Atlas 为什么延期？"
+    assert audit.rewritten_queries == ["Atlas 延期原因"]
+    assert not hasattr(audit, "query_type")
 
 
 def test_postgres_scrub_uses_session_value_in_query(monkeypatch):

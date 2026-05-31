@@ -72,14 +72,8 @@ class MemoFluxService:
                     query_embedding=query_embedding.output.get("embedding"),
                 )
             )
-        query_type = str(plan.output.get("query_type") or "direct")
-        if _uses_expanded_synthesis_pool(query_type):
-            memory_batches.append(self.repository.list_memories(session=session, limit=candidate_limit))
+        memory_batches.append(self.repository.list_memories(session=session, limit=candidate_limit))
         memories = _merge_memories_by_id(memory_batches, limit=candidate_limit)
-        if query_type in {"history", "temporal", "temporal_summary"}:
-            memories.sort(key=lambda memory: memory.occurred_at)
-        if _uses_newest_fact_order(query_type):
-            memories.sort(key=lambda memory: memory.occurred_at, reverse=True)
         self.repository.record_usage(
             operation="query_planner",
             input_tokens=plan.input_tokens,
@@ -88,13 +82,12 @@ class MemoFluxService:
             reasoning_tokens=plan.reasoning_tokens,
         )
         if not memories:
-            result = RecallResult(query_id=query_id, query_type="direct", answer=NO_ANSWER, references=[])
+            result = RecallResult(query_id=query_id, answer=NO_ANSWER, references=[])
             self.repository.record_query_audit(
                 QueryAuditRecord(
                     query_id=query_id,
                     session=session,
                     original_query=query,
-                    query_type="direct",
                     rewritten_queries=[str(item) for item in rewritten_queries],
                     candidate_limit=top_k,
                 retrieved=[],
@@ -108,8 +101,7 @@ class MemoFluxService:
                 )
             )
             return result
-        synthesis_memories = _synthesis_memories(query_type=query_type, memories=memories, top_k=top_k)
-        synthesis = _synthesize_answer(self.llm_client, query=query, query_type=query_type, memories=synthesis_memories)
+        synthesis = self.llm_client.synthesize_answer(query=query, memories=memories[:top_k])
         self.repository.record_usage(
             operation="answer_synthesizer",
             input_tokens=synthesis.input_tokens,
@@ -141,7 +133,6 @@ class MemoFluxService:
         ]
         result = RecallResult(
             query_id=query_id,
-            query_type=query_type,
             answer=str(synthesis.output.get("answer") or "\n".join(memory.content for memory in memories)),
             references=references,
             confidence=_coerce_confidence(synthesis.output.get("confidence")),
@@ -152,7 +143,6 @@ class MemoFluxService:
                 query_id=query_id,
                 session=session,
                 original_query=query,
-                query_type=result.query_type,
                 rewritten_queries=[str(item) for item in rewritten_queries],
                 candidate_limit=top_k,
                 retrieved=[_audit_memory_item(memory) for memory in memories],
@@ -340,93 +330,6 @@ def _candidate_pool_limit(top_k: int) -> int:
     """
 
     return max(top_k, min(top_k * 3, 60))
-
-
-def _synthesis_memories(*, query_type: str, memories: list, top_k: int) -> list:
-    """选择进入 Answer Synthesizer 的候选记忆。
-
-    Args:
-        query_type: Query Planner 输出的查询类型。
-        memories: 完整候选池，仍用于 audit 记录。
-        top_k: API 请求的引用规模提示。
-
-    Returns:
-        history/summary 类查询保留完整候选池，普通事实查询只使用前 top_k 个候选，减少跨主体相似候选干扰。
-    """
-
-    if _uses_expanded_synthesis_pool(query_type):
-        return memories
-    return memories[:top_k]
-
-
-def _uses_expanded_synthesis_pool(query_type: str) -> bool:
-    """判断查询类型是否需要完整候选池进入 Answer Synthesizer。
-
-    Args:
-        query_type: Query Planner 输出的查询类型。
-
-    Returns:
-        需要跨多条候选做语义选择或汇总时返回 True。
-    """
-
-    return query_type in {
-        "association",
-        "association_history",
-        "current_association",
-        "dependency",
-        "dependency_analysis",
-        "dependency_risk",
-        "history",
-        "relation",
-        "relationship",
-        "risk_dependency",
-        "summary",
-        "temporal",
-        "temporal_summary",
-    }
-
-
-def _uses_newest_fact_order(query_type: str) -> bool:
-    """判断查询类型是否应优先把最新事实传给 Answer Synthesizer。
-
-    Args:
-        query_type: Query Planner 输出的查询类型。
-
-    Returns:
-        查询当前依赖或当前事实时返回 True。
-    """
-
-    return query_type in {
-        "association",
-        "current_association",
-        "dependency",
-        "dependency_analysis",
-        "dependency_risk",
-        "relation",
-        "relationship",
-        "risk_dependency",
-    }
-
-
-def _synthesize_answer(llm_client, *, query: str, query_type: str, memories: list) -> LLMResult:
-    """调用 Answer Synthesizer，并兼容旧测试 fake client。
-
-    Args:
-        llm_client: LLM 客户端。
-        query: 原始查询。
-        query_type: Query Planner 输出的查询类型。
-        memories: 候选记忆。
-
-    Returns:
-        Answer Synthesizer 的结构化结果。
-    """
-
-    try:
-        return llm_client.synthesize_answer(query=query, query_type=query_type, memories=memories)
-    except TypeError as exc:
-        if "query_type" not in str(exc):
-            raise
-        return llm_client.synthesize_answer(query=query, memories=memories)
 
 
 def _audit_memory_item(memory) -> dict:

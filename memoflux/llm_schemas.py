@@ -18,7 +18,6 @@ class QueryPlanOutput(BaseModel):
 
     model_config = ConfigDict(extra="ignore")
 
-    query_type: str = "direct"
     rewritten_queries: list[str] = Field(default_factory=list)
 
     @field_validator("rewritten_queries", mode="before")
@@ -49,7 +48,6 @@ class AnswerSynthesisInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     query: str = Field(..., min_length=1)
-    query_type: str = "direct"
     memories: list[AnswerMemoryCandidate]
 
 

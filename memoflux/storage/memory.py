@@ -153,7 +153,6 @@ class MemoryRepository:
                 query_id=audit.query_id,
                 session=audit.session,
                 original_query=audit.original_query,
-                query_type=audit.query_type,
                 rewritten_queries=audit.rewritten_queries,
                 candidate_limit=audit.candidate_limit,
                 retrieved=retrieved,

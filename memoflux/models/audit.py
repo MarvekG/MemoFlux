@@ -11,7 +11,6 @@ class QueryAuditRecord:
     query_id: str
     session: str
     original_query: str
-    query_type: str
     rewritten_queries: list[str]
     candidate_limit: int
     retrieved: list[dict]

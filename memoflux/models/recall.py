@@ -19,7 +19,6 @@ class RecallResult:
     """召回答案。"""
 
     query_id: str
-    query_type: str
     answer: str
     references: list[RecallReference] = field(default_factory=list)
     confidence: float = 0.0
