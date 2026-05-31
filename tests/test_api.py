@@ -1042,6 +1042,16 @@ def test_postgres_query_audit_mapping_does_not_require_query_type():
     assert not hasattr(audit, "query_type")
 
 
+def test_postgres_table_definitions_are_extracted_from_repository_module():
+    from memoflux.storage import schema
+
+    assert schema.MemoryRow.__tablename__ == "memories"
+    assert schema.UsageRunRow.__tablename__ == "usage_runs"
+    assert schema.QueryAuditRow.__tablename__ == "memory_query_audits"
+    assert schema.DeleteAuditRow.__tablename__ == "memory_delete_audits"
+    assert "memoflux.memories" in schema.Base.metadata.tables
+
+
 def test_postgres_scrub_uses_session_value_in_query(monkeypatch):
     from memoflux.storage import postgres
 
