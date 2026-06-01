@@ -1,0 +1,57 @@
+services:
+  memo-postgres:
+    image: pgvector/pgvector:pg17
+    restart: unless-stopped
+    ports:
+      - "5433:5432"
+    environment:
+      POSTGRES_USER: memouser
+      POSTGRES_PASSWORD: memopassword
+      POSTGRES_DB: memo
+      TZ: Asia/Shanghai
+    volumes:
+      - memo_pgvector17_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U memouser -d memo"]
+      interval: 1m
+      start_interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    networks:
+      - memo_network
+
+  memo:
+    build:
+      context: ./
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    env_file:
+      - ./.env
+    ports:
+      - "8020:8010"
+    environment:
+      TZ: Asia/Shanghai
+    volumes:
+      - ./memo:/app # FOR DEBUG
+      - memo_runtime_data:/home/memo/.memoflux/data
+    depends_on:
+      memo-postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://127.0.0.1:8010/health"]
+      interval: 1m
+      start_interval: 10s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    networks:
+      - memo_network
+
+volumes:
+  memo_pgvector17_data:
+  memo_runtime_data:
+
+networks:
+  memo_network:
+    driver: bridge
