@@ -47,6 +47,25 @@ class MemoryRepository:
             del self._memories[memory_id]
         return matched
 
+    def delete_memories_before_occurred_at(self, cutoff) -> dict[str, list[str]]:
+        """按发生时间硬删除过期记忆并按 session 返回删除 ID。
+
+        Args:
+            cutoff: 过期判断截止时间，早于该时间的记忆会被删除。
+
+        Returns:
+            按 session 分组的已删除 memory_id 列表。
+        """
+
+        grouped: dict[str, list[str]] = {}
+        for memory_id, memory in list(self._memories.items()):
+            if memory.occurred_at < cutoff:
+                grouped.setdefault(memory.session, []).append(memory_id)
+        for memory_ids in grouped.values():
+            for memory_id in memory_ids:
+                del self._memories[memory_id]
+        return grouped
+
     def list_memories(self, *, session: str, limit: int) -> list[MemoryRecord]:
         """列出同一 session 内的原始记忆。"""
 

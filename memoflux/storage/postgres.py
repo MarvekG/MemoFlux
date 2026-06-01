@@ -79,6 +79,28 @@ class PostgresMemoryRepository:
             session.commit()
         return matched
 
+    def delete_memories_before_occurred_at(self, cutoff: datetime) -> dict[str, list[str]]:
+        """按发生时间硬删除过期记忆并按 session 返回删除 ID。
+
+        Args:
+            cutoff: 过期判断截止时间，早于该时间的记忆会被删除。
+
+        Returns:
+            按 session 分组的已删除 memory_id 列表。
+        """
+
+        select_statement = select(MemoryRow.session, MemoryRow.memory_id).where(MemoryRow.occurred_at < cutoff)
+        delete_statement = delete(MemoryRow).where(MemoryRow.occurred_at < cutoff)
+        grouped: dict[str, list[str]] = {}
+        with Session(self.engine) as session:
+            rows = session.execute(select_statement).all()
+            for memory_session, memory_id in rows:
+                grouped.setdefault(str(memory_session), []).append(str(memory_id))
+            if grouped:
+                session.execute(delete_statement)
+            session.commit()
+        return grouped
+
     def list_memories(self, *, session: str, limit: int) -> list[MemoryRecord]:
         """列出同一 session 内的原始记忆。"""
 

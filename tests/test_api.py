@@ -7,6 +7,7 @@ from memoflux.config import load_settings
 
 from memoflux.llm import LLMResult, OpenAICompatibleLLMClient
 from memoflux.models import MemoryRecord
+from memoflux.service import MemoFluxService
 from memoflux.storage.memory import MemoryRepository
 
 
@@ -547,6 +548,74 @@ def test_usage_stats_include_cached_tokens_and_hit_rate():
     assert stats.by_operation["query_planner"]["cache_miss_tokens"] == 70
 
 
+def test_retention_repository_deletes_by_occurred_at():
+    repository = MemoryRepository()
+    old_at = datetime(2025, 1, 1, 10, 0, tzinfo=UTC)
+    cutoff = datetime(2025, 7, 1, 0, 0, tzinfo=UTC)
+    recent_at = datetime(2025, 7, 2, 10, 0, tzinfo=UTC)
+    old_a = repository.insert_memory(session="session:a", content="A 旧记忆。", occurred_at=old_at)
+    old_b = repository.insert_memory(session="session:b", content="B 旧记忆。", occurred_at=old_at)
+    recent_a = repository.insert_memory(session="session:a", content="A 新记忆。", occurred_at=recent_at)
+
+    deleted = repository.delete_memories_before_occurred_at(cutoff)
+
+    assert deleted == {
+        "session:a": [old_a.memory_id],
+        "session:b": [old_b.memory_id],
+    }
+    assert [memory.memory_id for memory in repository.list_memories(session="session:a", limit=10)] == [
+        recent_a.memory_id
+    ]
+    assert repository.list_memories(session="session:b", limit=10) == []
+
+
+def test_cleanup_expired_memories_records_delete_audits_and_scrubs_queries():
+    repository = MemoryRepository()
+    service = MemoFluxService(repository, llm_client=FakeLLMClient(), embedding_client=FakeEmbeddingService())
+    app = create_app(repository=repository, llm_client=FakeLLMClient(), embedding_client=FakeEmbeddingService())
+    from fastapi.testclient import TestClient
+
+    client = TestClient(app)
+    old_at = "2025-01-01T10:00:00Z"
+    recent_at = "2026-05-01T10:00:00Z"
+    old_response = client.post(
+        "/v1/ingest",
+        json={"session": "session:a", "content": "Atlas 旧记忆。", "occurred_at": old_at},
+    )
+    old_memory_id = old_response.json()["data"]["memory_id"]
+    client.post(
+        "/v1/ingest",
+        json={"session": "session:a", "content": "Atlas 新记忆。", "occurred_at": recent_at},
+    )
+    other_old_response = client.post(
+        "/v1/ingest",
+        json={"session": "session:b", "content": "Zephyr 旧记忆。", "occurred_at": old_at},
+    )
+    other_old_memory_id = other_old_response.json()["data"]["memory_id"]
+    client.post("/v1/recall", json={"session": "session:a", "query": "Atlas 有哪些记忆？", "top_k": 2})
+
+    result = service.cleanup_expired_memories(retention_days=180)
+
+    assert result["status"] == "ok"
+    assert result["deleted"] == 2
+    assert result["sessions"] == 2
+    assert result["retention_days"] == 180
+    assert "cutoff_occurred_at" in result
+    session_a_audits = repository.list_audits(session="session:a", limit=10)
+    session_b_audits = repository.list_audits(session="session:b", limit=10)
+    session_a_delete = next(item for item in session_a_audits if item.delete_id)
+    session_b_delete = next(item for item in session_b_audits if item.delete_id)
+    assert session_a_delete.target["mode"] == "retention_cleanup"
+    assert session_a_delete.affected_memory_ids == [old_memory_id]
+    assert session_b_delete.affected_memory_ids == [other_old_memory_id]
+    query_audit = next(item for item in session_a_audits if getattr(item, "query_id", None))
+    old_items = [item for item in query_audit.retrieved if item["memory_id"] == old_memory_id]
+    assert old_items[0]["content_preview"] is None
+    assert query_audit.final_answer is None
+    assert old_memory_id not in query_audit.selection_reasons
+    assert [memory.content for memory in repository.list_memories(session="session:a", limit=10)] == ["Atlas 新记忆。"]
+
+
 def test_recall_uses_configured_llm_without_returning_usage():
     llm_client = FakeLLMClient()
     app = create_app(repository=MemoryRepository(), llm_client=llm_client, embedding_client=FakeEmbeddingService())
@@ -1000,6 +1069,20 @@ def test_settings_use_memoflux_embedding_configuration(monkeypatch):
     assert settings.embedding_base_url == "http://litellm:4000/v1"
 
 
+def test_retention_cleanup_settings_defaults(monkeypatch):
+    monkeypatch.delenv("MEMOFLUX_MEMORY_CLEANUP_ENABLED", raising=False)
+    monkeypatch.delenv("MEMOFLUX_MEMORY_RETENTION_DAYS", raising=False)
+    monkeypatch.delenv("MEMOFLUX_MEMORY_CLEANUP_HOUR", raising=False)
+    monkeypatch.delenv("MEMOFLUX_MEMORY_CLEANUP_MINUTE", raising=False)
+
+    settings = load_settings()
+
+    assert settings.memory_cleanup_enabled is True
+    assert settings.memory_retention_days == 180
+    assert settings.memory_cleanup_hour == 4
+    assert settings.memory_cleanup_minute == 15
+
+
 def test_app_lifespan_schedules_embedding_prewarm(monkeypatch):
     monkeypatch.setenv("MEMOFLUX_EMBEDDING_PREWARM_ON_STARTUP", "true")
     fake_embedding_service = FakeEmbeddingService()
@@ -1012,6 +1095,37 @@ def test_app_lifespan_schedules_embedding_prewarm(monkeypatch):
 
     assert response.status_code == 200
     assert fake_embedding_service.prewarm_calls == 1
+
+
+def test_create_app_does_not_start_retention_cleanup_when_disabled(monkeypatch):
+    monkeypatch.setenv("MEMOFLUX_EMBEDDING_PREWARM_ON_STARTUP", "false")
+    monkeypatch.setenv("MEMOFLUX_MEMORY_CLEANUP_ENABLED", "false")
+    created_tasks = []
+
+    async def fake_loop(*args, **kwargs):
+        return None
+
+    def fake_create_task(coro):
+        created_tasks.append(coro)
+        coro.close()
+
+        class FakeTask:
+            def cancel(self):
+                return None
+
+        return FakeTask()
+
+    monkeypatch.setattr("memoflux.retention._memory_retention_cleanup_loop", fake_loop)
+    monkeypatch.setattr("asyncio.create_task", fake_create_task)
+    app = create_app(repository=MemoryRepository(), embedding_client=FakeEmbeddingService())
+
+    from fastapi.testclient import TestClient
+
+    with TestClient(app) as client:
+        response = client.get("/v1/health")
+
+    assert response.status_code == 200
+    assert created_tasks == []
 
 
 def test_app_lifespan_skips_embedding_prewarm_when_disabled(monkeypatch):
