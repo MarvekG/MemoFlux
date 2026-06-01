@@ -3,11 +3,12 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from uuid import uuid4
 
+from memoflux.i18n import i18n_service
 from memoflux.llm import LLMResult, LocalLLMClient
 from memoflux.models import DeleteAuditRecord, DeleteResult, QueryAuditRecord, RecallReference, RecallResult
 from memoflux.services.embedding_service import embedding_service
 
-NO_ANSWER = "未找到可用于回答该问题的记忆。"
+NO_ANSWER_KEY = "answers.no_memory"
 
 
 class MemoFluxService:
@@ -42,7 +43,7 @@ class MemoFluxService:
             embedding=embedding.output.get("embedding"),
         )
 
-    def recall(self, *, session: str, query: str, top_k: int = 12) -> RecallResult:
+    def recall(self, *, session: str, query: str, top_k: int = 12, lang: str | None = None) -> RecallResult:
         """召回同一 session 内的候选记忆并生成答案。"""
 
         if not session:
@@ -82,7 +83,7 @@ class MemoFluxService:
             reasoning_tokens=plan.reasoning_tokens,
         )
         if not memories:
-            result = RecallResult(query_id=query_id, answer=NO_ANSWER, references=[])
+            result = RecallResult(query_id=query_id, answer=i18n_service.t(NO_ANSWER_KEY, lang=lang), references=[])
             self.repository.record_query_audit(
                 QueryAuditRecord(
                     query_id=query_id,

@@ -1,0 +1,14 @@
+{
+  "common": {
+    "success": "Success",
+    "ok": "OK"
+  },
+  "errors": {
+    "http_error": "HTTP error",
+    "validation_error": "Validation error"
+  },
+  "answers": {
+    "no_memory": "No memory is available to answer this question.",
+    "no_evidence": "There is not enough memory in the current session to answer this question."
+  }
+}

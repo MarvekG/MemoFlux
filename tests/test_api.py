@@ -444,6 +444,50 @@ def test_recall_requires_session_field():
     assert response.status_code == 422
 
 
+def test_i18n_endpoint_returns_locale_bundle():
+    app = create_app(repository=MemoryRepository(), embedding_client=FakeEmbeddingService())
+    from fastapi.testclient import TestClient
+
+    client = TestClient(app)
+    response = client.get("/v1/i18n/en")
+
+    data = response.json()["data"]
+    assert response.status_code == 200
+    assert data["common"]["success"] == "Success"
+    assert data["errors"]["validation_error"] == "Validation error"
+
+
+def test_http_error_uses_accept_language():
+    app = create_app(repository=MemoryRepository(), embedding_client=FakeEmbeddingService())
+    from fastapi.testclient import TestClient
+
+    client = TestClient(app)
+    response = client.post(
+        "/v1/delete",
+        json={"session": "s", "query": "delete something", "dry_run": False},
+        headers={"Accept-Language": "en-US,en;q=0.9"},
+    )
+
+    assert response.status_code == 400
+    assert response.json()["error"]["message"] == "Validation error"
+    assert response.json()["error"]["details"]["reason"] == "query delete requires dry_run=true"
+
+
+def test_no_memory_recall_uses_accept_language():
+    app = create_app(repository=MemoryRepository(), embedding_client=FakeEmbeddingService())
+    from fastapi.testclient import TestClient
+
+    client = TestClient(app)
+    response = client.post(
+        "/v1/recall",
+        json={"session": "s", "query": "Atlas 为什么延期？"},
+        headers={"Accept-Language": "en"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["data"]["answer"] == "No memory is available to answer this question."
+
+
 def test_usage_stats_are_aggregate_only():
     app = create_app(repository=MemoryRepository(), embedding_client=FakeEmbeddingService())
     from fastapi.testclient import TestClient

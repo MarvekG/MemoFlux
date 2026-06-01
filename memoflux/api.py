@@ -4,11 +4,12 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, Header, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
 
 from memoflux.config import load_settings
+from memoflux.i18n import i18n_service, normalize_language
 from memoflux.llm import LocalLLMClient, OpenAICompatibleLLMClient
 from memoflux.models import DeleteAuditRecord, MemoryRecord, QueryAuditRecord, RecallReference
 from memoflux.service import MemoFluxService
@@ -60,10 +61,11 @@ def create_app(*, repository=None, llm_client=None, embedding_client=None, datab
     app.state.service = service
 
     @app.exception_handler(HTTPException)
-    def http_exception_handler(_, exc: HTTPException):
+    def http_exception_handler(request: Request, exc: HTTPException):
+        lang = _request_language(request)
         if isinstance(exc.detail, dict) and "error" in exc.detail:
             return JSONResponse(status_code=exc.status_code, content=exc.detail)
-        return JSONResponse(status_code=exc.status_code, content=_error("http_error", str(exc.detail)))
+        return JSONResponse(status_code=exc.status_code, content=_error("http_error", lang=lang, details={"reason": str(exc.detail)}))
 
     @app.post("/v1/ingest")
     def ingest(request: IngestRequest):
@@ -71,8 +73,13 @@ def create_app(*, repository=None, llm_client=None, embedding_client=None, datab
         return _ok(_memory_payload(memory, include_content=False))
 
     @app.post("/v1/recall")
-    def recall(request: RecallRequest):
-        result = service.recall(session=request.session, query=request.query, top_k=request.top_k)
+    def recall(request: RecallRequest, accept_language: str | None = Header(default=None)):
+        result = service.recall(
+            session=request.session,
+            query=request.query,
+            top_k=request.top_k,
+            lang=normalize_language(accept_language),
+        )
         payload = {
             "query_id": result.query_id,
             "answer": result.answer,
@@ -83,7 +90,8 @@ def create_app(*, repository=None, llm_client=None, embedding_client=None, datab
         return _ok(payload)
 
     @app.post("/v1/delete")
-    def delete(request: DeleteRequest):
+    def delete(request: DeleteRequest, accept_language: str | None = Header(default=None)):
+        lang = normalize_language(accept_language)
         try:
             result = service.delete(
                 session=request.session,
@@ -92,8 +100,19 @@ def create_app(*, repository=None, llm_client=None, embedding_client=None, datab
                 dry_run=request.dry_run,
             )
         except ValueError as error:
-            raise HTTPException(status_code=400, detail=_error("validation_error", str(error))) from error
+            raise HTTPException(
+                status_code=400,
+                detail=_error("validation_error", lang=lang, details={"reason": str(error)}),
+            ) from error
         return _ok(result.__dict__)
+
+    @app.get("/v1/i18n/{lang}")
+    def i18n(lang: str):
+        return _ok(i18n_service.get_locale(lang))
+
+    @app.get("/v1/general/i18n/{lang}")
+    def general_i18n(lang: str):
+        return _ok(i18n_service.get_locale(lang))
 
     @app.post("/v1/prompt-eval")
     def prompt_eval(request: PromptEvalRequest):
@@ -158,8 +177,25 @@ def _ok(data):
     return {"data": data, "error": None}
 
 
-def _error(code: str, message: str):
-    return {"data": None, "error": {"code": code, "message": message, "details": {}, "query_id": None}}
+def _error(code: str, *, lang: str | None = None, details: dict[str, Any] | None = None):
+    return {
+        "data": None,
+        "error": {
+            "code": code,
+            "message": i18n_service.t(f"errors.{code}", lang=lang),
+            "details": details or {},
+            "query_id": None,
+        },
+    }
+
+
+def _request_language(request: Request) -> str:
+    """从请求中解析语言。"""
+
+    lang = request.query_params.get("lang")
+    if lang:
+        return normalize_language(lang)
+    return normalize_language(request.headers.get("accept-language"))
 
 
 def _memory_payload(memory: MemoryRecord, *, include_content: bool) -> dict[str, Any]:

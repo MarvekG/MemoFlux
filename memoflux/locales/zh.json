@@ -1,0 +1,14 @@
+{
+  "common": {
+    "success": "操作成功",
+    "ok": "正常"
+  },
+  "errors": {
+    "http_error": "HTTP 错误",
+    "validation_error": "参数校验失败"
+  },
+  "answers": {
+    "no_memory": "未找到可用于回答该问题的记忆。",
+    "no_evidence": "当前 session 中没有足够记忆支持回答该问题。"
+  }
+}
