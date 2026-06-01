@@ -13,7 +13,7 @@ MemoFlux 按独立、长期演进的服务设计，而不是某个项目内部�
 - 通过同一条三层查询链路支持直接查询、关联查询、历史查询和前因后果查询。
 - 每条记忆必须提供事件发生时间 `occurred_at`，确保历史和因果回答按事件时间组织，而不是按写入时间误排。
 - 原始记忆内容写入后不可修改，纠错通过追加新记忆表达。
-- 支持彻底删除记忆；这里的“删除”和“遗忘”是同一个语义，都是不可恢复地删除原始记忆正文和派生检索数据。
+- 支持彻底删除记忆；这里的“删除”和“遗忘”是同一个语义，都是不可恢复地删除原始记忆正文和派生检索数据。除用户显式删除外，MemoFlux 还通过可配置保留期后台任务删除过期记忆，详见 `docs/005-memoflux-retention-cleanup-design.md`。
 - 第一版引入 pgvector 保存 embedding，用 LLM query rewrite、向量召回、PostgreSQL 文本/时间兜底和 LLM 答案整合验证效果。
 - 记录足够详细的审计日志，用于定位 query rewrite、候选检索、LLM 答案整合、延迟和失败原因。
 - LLM 用量不在单次业务响应中返回，也不提供按请求开启返回用量的开关；用量只通过聚合 usage stats 接口查询和清空。
@@ -100,6 +100,7 @@ created_at: timestamptz not null
 - `content` 不允许更新。
 - `occurred_at` 不允许更新。
 - 删除是硬删除：从 `memories` 移除整条业务记录，并清理相关派生检索数据。
+- 可配置保留期清理同样使用硬删除，默认按 `occurred_at` 删除 180 天前的记忆。
 - 纠错通过新增 memory 表达。
 
 ### 5.2 检索派生数据
@@ -204,6 +205,8 @@ MemoFlux 的删除就是遗忘，语义是不可恢复地删除原始记忆：
 - 删除不可恢复。
 
 按 `memory_id` 删除是确定性操作，不需要 LLM。按自然语言描述寻找待删除记忆时，可以通过 LLM query planner、向量召回和文本/时间检索生成候选，但不可直接执行删除；调用方必须先 dry-run 查看候选，再用明确 `memory_ids` 执行删除。
+
+MemoFlux 还支持后台保留期清理。该任务每天执行一次，按 `occurred_at < now_utc - retention_days` 删除过期记忆，默认保留 180 天。清理任务不调用 LLM，不新增软删除状态，不保留归档副本；删除后继续清理历史审计中的原文片段，并按 session 写入 `memory_delete_audits`。完整设计见 `docs/005-memoflux-retention-cleanup-design.md`。
 
 ## 7. 查询流程
 

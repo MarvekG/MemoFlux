@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
+from typing import Any
 from uuid import uuid4
 
 from memoflux.i18n import i18n_service
@@ -240,6 +241,51 @@ class MemoFluxService:
 
         return self.repository.clear_usage_stats()
 
+    def cleanup_expired_memories(self, *, retention_days: int | None = None) -> dict[str, Any]:
+        """按发生时间清理超过保留期的记忆。
+
+        Args:
+            retention_days: 记忆保留天数；为空时使用默认保留期。
+
+        Returns:
+            清理结果摘要，包含删除数量、session 数、保留天数和截止时间。
+        """
+
+        normalized_retention_days = _coerce_retention_days(retention_days)
+        cutoff = _now_utc() - timedelta(days=normalized_retention_days)
+        deleted_by_session = self.repository.delete_memories_before_occurred_at(cutoff)
+        deleted_total = 0
+        for session, memory_ids in deleted_by_session.items():
+            if not memory_ids:
+                continue
+            deleted_total += len(memory_ids)
+            self.repository.scrub_deleted_memory_from_audits(session=session, memory_ids=memory_ids)
+            self.repository.record_delete_audit(
+                DeleteAuditRecord(
+                    delete_id=uuid4().hex,
+                    session=session,
+                    target={
+                        "mode": "retention_cleanup",
+                        "retention_days": normalized_retention_days,
+                        "cutoff_occurred_at": cutoff.isoformat(),
+                    },
+                    dry_run=False,
+                    matched_memory_ids=memory_ids,
+                    affected_memory_ids=memory_ids,
+                    status="ok",
+                    error_code=None,
+                    error_message=None,
+                    created_at=_now_utc(),
+                )
+            )
+        return {
+            "status": "ok",
+            "deleted": deleted_total,
+            "sessions": sum(1 for memory_ids in deleted_by_session.values() if memory_ids),
+            "retention_days": normalized_retention_days,
+            "cutoff_occurred_at": cutoff.isoformat(),
+        }
+
 
 def _filter_used_memories(memories, used_memory_ids: list[str]) -> list:
     """按 LLM 声明使用的记忆 ID 严格过滤候选。
@@ -350,6 +396,23 @@ def _now_utc() -> datetime:
     """返回当前 UTC 时间。"""
 
     return datetime.now(tz=UTC)
+
+
+def _coerce_retention_days(value: int | None) -> int:
+    """将记忆保留天数限制在允许范围内。
+
+    Args:
+        value: 调用方传入的保留天数。
+
+    Returns:
+        应用于清理任务的保留天数。
+    """
+
+    try:
+        parsed = int(value) if value is not None else 180
+    except (TypeError, ValueError):
+        parsed = 180
+    return max(1, min(3650, parsed))
 
 
 def _coerce_confidence(value) -> float:

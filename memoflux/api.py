@@ -14,6 +14,7 @@ from memoflux.config import load_settings
 from memoflux.i18n import i18n_service, normalize_language
 from memoflux.llm import LocalLLMClient, OpenAICompatibleLLMClient
 from memoflux.models import DeleteAuditRecord, MemoryRecord, QueryAuditRecord, RecallReference
+from memoflux.retention import start_memory_retention_cleanup
 from memoflux.service import MemoFluxService
 from memoflux.storage.postgres import PostgresMemoryRepository
 
@@ -54,6 +55,7 @@ class PromptEvalRequest(BaseModel):
 def create_app(*, repository=None, llm_client=None, embedding_client=None, database_path: Path | None = None) -> FastAPI:
     """创建 MemoFlux FastAPI 应用。"""
 
+    settings = load_settings()
     service = MemoFluxService(
         repository or _build_default_repository(),
         llm_client=llm_client or _build_default_llm_client(),
@@ -62,8 +64,20 @@ def create_app(*, repository=None, llm_client=None, embedding_client=None, datab
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
-        asyncio.create_task(asyncio.to_thread(service.embedding_service.prewarm_local_model))
-        yield
+        prewarm_task = None
+        cleanup_task = None
+        if settings.embedding_prewarm_on_startup:
+            prewarm_task = asyncio.create_task(asyncio.to_thread(service.embedding_service.prewarm_local_model))
+        if settings.memory_cleanup_enabled:
+            cleanup_task = start_memory_retention_cleanup(service=service, settings=settings)
+        try:
+            yield
+        finally:
+            tasks = [task for task in (cleanup_task, prewarm_task) if task is not None]
+            for task in tasks:
+                task.cancel()
+            if tasks:
+                await asyncio.gather(*tasks, return_exceptions=True)
 
     app = FastAPI(title="MemoFlux", version="0.1.0", lifespan=lifespan)
     app.state.service = service
@@ -164,7 +178,6 @@ def _build_default_repository():
         schema=settings.database_schema,
         embedding_dimension=settings.embedding_dimension,
     )
-
 
 def _build_default_llm_client():
     settings = load_settings()
