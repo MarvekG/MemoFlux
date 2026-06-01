@@ -301,10 +301,16 @@ class CapturePayloadLLMClient(OpenAICompatibleLLMClient):
 class FakeEmbeddingService:
     def __init__(self) -> None:
         self.calls = []
+        self.prewarm_calls = 0
 
     def embed_text(self, text: str) -> list[float]:
         self.calls.append(text)
         return [0.1, 0.2, 0.3]
+
+    def prewarm_local_model(self) -> None:
+        if not load_settings().embedding_prewarm_on_startup:
+            return
+        self.prewarm_calls += 1
 
 
 class VectorAwareMemoryRepository(MemoryRepository):
@@ -985,6 +991,48 @@ def test_settings_use_memoflux_embedding_configuration(monkeypatch):
     assert settings.embedding_dimension == 2048
     assert settings.embedding_api_key == "embedding-key"
     assert settings.embedding_base_url == "http://litellm:4000/v1"
+
+
+def test_app_lifespan_schedules_embedding_prewarm(monkeypatch):
+    monkeypatch.setenv("MEMOFLUX_EMBEDDING_PREWARM_ON_STARTUP", "true")
+    fake_embedding_service = FakeEmbeddingService()
+    app = create_app(repository=MemoryRepository(), embedding_client=fake_embedding_service)
+
+    from fastapi.testclient import TestClient
+
+    with TestClient(app) as client:
+        response = client.get("/v1/health")
+
+    assert response.status_code == 200
+    assert fake_embedding_service.prewarm_calls == 1
+
+
+def test_app_lifespan_skips_embedding_prewarm_when_disabled(monkeypatch):
+    monkeypatch.setenv("MEMOFLUX_EMBEDDING_PREWARM_ON_STARTUP", "false")
+    fake_embedding_service = FakeEmbeddingService()
+    app = create_app(repository=MemoryRepository(), embedding_client=fake_embedding_service)
+
+    from fastapi.testclient import TestClient
+
+    with TestClient(app) as client:
+        response = client.get("/v1/health")
+
+    assert response.status_code == 200
+    assert fake_embedding_service.prewarm_calls == 0
+
+
+def test_embedding_prewarm_skips_non_local_provider(monkeypatch):
+    from memoflux.services.embedding_service import EmbeddingService
+
+    monkeypatch.setenv("MEMOFLUX_EMBEDDING_PREWARM_ON_STARTUP", "true")
+    monkeypatch.setenv("MEMOFLUX_EMBEDDING_PROVIDER", "openai_compatible")
+    service = EmbeddingService()
+    load_calls = []
+    monkeypatch.setattr(service, "_load_local_model", lambda: load_calls.append("loaded"))
+
+    service.prewarm_local_model()
+
+    assert load_calls == []
 
 
 def test_default_embedding_provider_is_local_with_configured_dimension(monkeypatch):

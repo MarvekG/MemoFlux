@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+import logging
 import os
 from typing import Any
 
 from memoflux.config import load_settings
+
+
+logger = logging.getLogger(__name__)
 
 
 class EmbeddingService:
@@ -95,6 +99,27 @@ class EmbeddingService:
             kwargs["cache_folder"] = self._cache_dir
         self._local_model = SentenceTransformer(self._model, **kwargs)
         return self._local_model
+
+    def prewarm_local_model(self) -> None:
+        """在后台提前加载本地向量模型。
+
+        配置关闭预热或当前不是本地向量提供方时直接返回，用于降低首个业务请求的
+        权重加载延迟。预热失败只记录日志，避免后台任务异常影响 FastAPI 应用启动。
+
+        Raises:
+            不主动抛出异常；本地模型加载异常会被捕获并记录日志。
+        """
+
+        settings = load_settings()
+        if not settings.embedding_prewarm_on_startup or self._provider != "local":
+            return
+        try:
+            self._load_local_model()
+        except Exception:
+            logger.exception(
+                "Failed to prewarm local embedding model",
+                extra={"embedding_model": self._model},
+            )
 
     def _embed_openai_compatible_texts(self, texts: list[str]) -> list[list[float]]:
         if not self._api_key:
