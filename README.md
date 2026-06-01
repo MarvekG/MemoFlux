@@ -22,12 +22,12 @@ Real provider keys and model aliases stay in the LiteLLM configuration. Do not p
 
 ## Runtime Database
 
-MemoFlux uses the root Compose `memory-postgres` service for persistence. That container uses `pgvector/pgvector:pg17`, so this version stores vectors and performs vector recall through SQLAlchemy and pgvector.
+MemoFlux uses the root Compose `memo-postgres` service for persistence. That container uses `pgvector/pgvector:pg17`, so this version stores vectors and performs vector recall through SQLAlchemy and pgvector.
 
 Use an independent environment variable for MemoFlux:
 
 ```bash
-export MEMOFLUX_DATABASE_URL='postgresql+psycopg2://tradeuser:tradepassword@memory-postgres:5432/memory'
+export MEMOFLUX_DATABASE_URL='postgresql+psycopg2://tradeuser:tradepassword@memo-postgres:5432/memory'
 ```
 
 MemoFlux keeps its tables under the `memoflux` schema by default.
@@ -44,10 +44,10 @@ Embedding configuration:
 export MEMOFLUX_EMBEDDING_PROVIDER='local'
 export MEMOFLUX_EMBEDDING_MODEL='BAAI/bge-base-zh-v1.5'
 export MEMOFLUX_EMBEDDING_DIM='768'
-export MEMOFLUX_EMBEDDING_CACHE_DIR='/home/memory/.insight_memory/data/models'
+export MEMOFLUX_EMBEDDING_CACHE_DIR='/home/memo/.memoflux/data/models'
 ```
 
-In the Best-AI-Trader Compose stacks, `memo`/`memoflux` mounts `memory_runtime_data` so local sentence-transformer models are persisted under `/home/memory/.insight_memory/data/models`.
+In the Best-AI-Trader Compose stacks, `memo`/`memoflux` mounts `memo_runtime_data` so local sentence-transformer models are persisted under `/home/memo/.memoflux/data/models`.
 
 ## Run With Docker
 
@@ -57,7 +57,7 @@ MemoFlux is included in the root `docker-compose.yml`. In `docker-compose.dev.ym
 docker compose -f docker-compose.example.yml up -d --build
 ```
 
-The example compose file joins the existing Best-AI-Trader Docker network so `memory-postgres` and `litellm` are reachable by service name.
+The example compose file joins the existing Best-AI-Trader Docker network so `memo-postgres` and `litellm` are reachable by service name.
 
 ## API
 
