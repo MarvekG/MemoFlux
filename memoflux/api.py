@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+from contextlib import asynccontextmanager
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -52,12 +54,18 @@ class PromptEvalRequest(BaseModel):
 def create_app(*, repository=None, llm_client=None, embedding_client=None, database_path: Path | None = None) -> FastAPI:
     """创建 MemoFlux FastAPI 应用。"""
 
-    app = FastAPI(title="MemoFlux", version="0.1.0")
     service = MemoFluxService(
         repository or _build_default_repository(),
         llm_client=llm_client or _build_default_llm_client(),
         embedding_client=embedding_client,
     )
+
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        asyncio.create_task(asyncio.to_thread(service.embedding_service.prewarm_local_model))
+        yield
+
+    app = FastAPI(title="MemoFlux", version="0.1.0", lifespan=lifespan)
     app.state.service = service
 
     @app.exception_handler(HTTPException)
