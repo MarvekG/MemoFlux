@@ -457,6 +457,16 @@ def test_i18n_endpoint_returns_locale_bundle():
     assert data["errors"]["validation_error"] == "Validation error"
 
 
+def test_general_i18n_endpoint_is_not_exposed():
+    app = create_app(repository=MemoryRepository(), embedding_client=FakeEmbeddingService())
+    from fastapi.testclient import TestClient
+
+    client = TestClient(app)
+    response = client.get("/v1/general/i18n/en")
+
+    assert response.status_code == 404
+
+
 def test_http_error_uses_accept_language():
     app = create_app(repository=MemoryRepository(), embedding_client=FakeEmbeddingService())
     from fastapi.testclient import TestClient
@@ -985,6 +995,29 @@ def test_default_embedding_provider_is_local_with_configured_dimension(monkeypat
 
     assert settings.embedding_provider == "local"
     assert settings.embedding_dimension == 768
+
+
+def test_settings_fallback_to_llm_values_for_embedding_client(monkeypatch):
+    monkeypatch.delenv("MEMOFLUX_EMBEDDING_API_KEY", raising=False)
+    monkeypatch.delenv("MEMOFLUX_EMBEDDING_BASE_URL", raising=False)
+    monkeypatch.setenv("MEMOFLUX_LLM_API_KEY", "llm-key")
+    monkeypatch.setenv("MEMOFLUX_LLM_BASE_URL", "http://litellm:4000/v1")
+
+    settings = load_settings()
+
+    assert settings.embedding_api_key == "llm-key"
+    assert settings.embedding_base_url == "http://litellm:4000/v1"
+
+
+def test_settings_ignore_configured_env_file(monkeypatch, tmp_path):
+    env_file = tmp_path / ".env"
+    env_file.write_text("MEMOFLUX_SERVICE_PORT=9123\n", encoding="utf-8")
+    monkeypatch.setenv("MEMOFLUX_ENV", str(env_file))
+    monkeypatch.delenv("MEMOFLUX_SERVICE_PORT", raising=False)
+
+    settings = load_settings()
+
+    assert settings.service_port == 8020
 
 
 def test_local_embedding_uses_configured_dimension():

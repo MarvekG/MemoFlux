@@ -110,10 +110,6 @@ def create_app(*, repository=None, llm_client=None, embedding_client=None, datab
     def i18n(lang: str):
         return _ok(i18n_service.get_locale(lang))
 
-    @app.get("/v1/general/i18n/{lang}")
-    def general_i18n(lang: str):
-        return _ok(i18n_service.get_locale(lang))
-
     @app.post("/v1/prompt-eval")
     def prompt_eval(request: PromptEvalRequest):
         result = service.llm_client.run_prompt(prompt_key=request.prompt_key, payload=request.payload)
