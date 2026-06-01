@@ -57,7 +57,9 @@ class MemoFluxService:
         candidate_limit = _candidate_pool_limit(top_k)
         memory_batches = []
         query_embeddings = self.embedding_service.embed_texts(retrieval_queries)
-        for retrieval_query, embedding in zip(retrieval_queries, query_embeddings, strict=False):
+        if len(query_embeddings) != len(retrieval_queries):
+            raise ValueError("recall embedding count does not match retrieval query count")
+        for embedding in query_embeddings:
             query_embedding = LLMResult(output={"embedding": embedding})
             self.repository.record_usage(
                 operation="embedding:recall",
