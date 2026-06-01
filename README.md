@@ -47,7 +47,7 @@ export MEMOFLUX_EMBEDDING_DIM='768'
 export MEMOFLUX_EMBEDDING_CACHE_DIR='/home/memory/.insight_memory/data/models'
 ```
 
-In the Best-AI-Trader dev Compose stack, `memo` mounts the same `memory_runtime_data` volume used by the legacy memory service so local sentence-transformer models are shared under `/home/memory/.insight_memory/data/models`.
+In the Best-AI-Trader Compose stacks, `memo`/`memoflux` mounts `memory_runtime_data` so local sentence-transformer models are persisted under `/home/memory/.insight_memory/data/models`.
 
 ## Run With Docker
 
