@@ -301,11 +301,17 @@ class CapturePayloadLLMClient(OpenAICompatibleLLMClient):
 class FakeEmbeddingService:
     def __init__(self) -> None:
         self.calls = []
+        self.batch_calls = []
         self.prewarm_calls = 0
 
     def embed_text(self, text: str) -> list[float]:
         self.calls.append(text)
         return [0.1, 0.2, 0.3]
+
+    def embed_texts(self, texts: list[str]) -> list[list[float]]:
+        self.batch_calls.append(list(texts))
+        self.calls.extend(texts)
+        return [[0.1, 0.2, 0.3] for _ in texts]
 
     def prewarm_local_model(self) -> None:
         if not load_settings().embedding_prewarm_on_startup:
@@ -631,6 +637,7 @@ def test_recall_searches_original_and_rewritten_queries():
         "Atlas 延期原因",
         "Atlas 数据库回滚风险",
     ]
+    assert fake_embedding_service.batch_calls == [["Atlas 为什么延期？", "Atlas 延期原因", "Atlas 数据库回滚风险"]]
     assert repository.search_embeddings == [[0.1, 0.2, 0.3], [0.1, 0.2, 0.3], [0.1, 0.2, 0.3]]
 
 

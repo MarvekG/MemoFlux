@@ -56,8 +56,9 @@ class MemoFluxService:
         retrieval_queries = _build_retrieval_queries(query, rewritten_queries)
         candidate_limit = _candidate_pool_limit(top_k)
         memory_batches = []
-        for retrieval_query in retrieval_queries:
-            query_embedding = LLMResult(output={"embedding": self.embedding_service.embed_text(retrieval_query)})
+        query_embeddings = self.embedding_service.embed_texts(retrieval_queries)
+        for retrieval_query, embedding in zip(retrieval_queries, query_embeddings, strict=False):
+            query_embedding = LLMResult(output={"embedding": embedding})
             self.repository.record_usage(
                 operation="embedding:recall",
                 input_tokens=query_embedding.input_tokens,
