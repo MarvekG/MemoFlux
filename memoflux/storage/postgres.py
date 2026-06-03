@@ -101,13 +101,18 @@ class PostgresMemoryRepository:
             session.commit()
         return grouped
 
-    def list_memories(self, *, session: str, limit: int) -> list[MemoryRecord]:
-        """列出同一 session 内的原始记忆。"""
+    def list_memories(self, *, session: str | None, limit: int, offset: int = 0) -> tuple[list[MemoryRecord], int]:
+        """列出原始记忆，未指定 session 时返回所有 session。"""
 
-        statement = select(MemoryRow).where(MemoryRow.session == session).order_by(MemoryRow.occurred_at.asc()).limit(limit)
+        statement = select(MemoryRow).order_by(MemoryRow.occurred_at.asc()).offset(offset).limit(limit)
+        count_statement = select(func.count(MemoryRow.memory_id))
+        if session is not None:
+            statement = statement.where(MemoryRow.session == session)
+            count_statement = count_statement.where(MemoryRow.session == session)
         with Session(self.engine) as session:
             rows = session.scalars(statement).all()
-        return [_memory_from_row(row) for row in rows]
+            total = int(session.scalar(count_statement) or 0)
+        return [_memory_from_row(row) for row in rows], total
 
     def record_usage(
         self,
@@ -205,36 +210,39 @@ class PostgresMemoryRepository:
     def list_audits(
         self,
         *,
-        session: str,
+        session: str | None,
         limit: int,
+        offset: int = 0,
         query_id: str | None = None,
-    ) -> list[QueryAuditRecord | DeleteAuditRecord]:
-        """列出同一 session 内的查询和删除审计。"""
+    ) -> tuple[list[QueryAuditRecord | DeleteAuditRecord], int]:
+        """列出查询和删除审计，未指定 session 时返回所有 session。"""
 
         with Session(self.engine) as db_session:
             if query_id:
                 row = db_session.get(QueryAuditRow, query_id)
-                return [_query_audit_from_row(row)] if row and row.session == session else []
+                items = [_query_audit_from_row(row)] if row and (session is None or row.session == session) else []
+                return items[offset:offset + limit], len(items)
+            fetch_limit = offset + limit
+            query_statement = select(QueryAuditRow).order_by(QueryAuditRow.created_at.desc()).limit(fetch_limit)
+            delete_statement = select(DeleteAuditRow).order_by(DeleteAuditRow.created_at.desc()).limit(fetch_limit)
+            query_count_statement = select(func.count(QueryAuditRow.query_id))
+            delete_count_statement = select(func.count(DeleteAuditRow.delete_id))
+            if session is not None:
+                query_statement = query_statement.where(QueryAuditRow.session == session)
+                delete_statement = delete_statement.where(DeleteAuditRow.session == session)
+                query_count_statement = query_count_statement.where(QueryAuditRow.session == session)
+                delete_count_statement = delete_count_statement.where(DeleteAuditRow.session == session)
             query_rows = list(
-                db_session.scalars(
-                    select(QueryAuditRow)
-                    .where(QueryAuditRow.session == session)
-                    .order_by(QueryAuditRow.created_at.desc())
-                    .limit(limit)
-                ).all()
+                db_session.scalars(query_statement).all()
             )
             delete_rows = list(
-                db_session.scalars(
-                    select(DeleteAuditRow)
-                    .where(DeleteAuditRow.session == session)
-                    .order_by(DeleteAuditRow.created_at.desc())
-                    .limit(limit)
-                ).all()
+                db_session.scalars(delete_statement).all()
             )
+            total = int(db_session.scalar(query_count_statement) or 0) + int(db_session.scalar(delete_count_statement) or 0)
         audits: list[QueryAuditRecord | DeleteAuditRecord] = [_query_audit_from_row(row) for row in query_rows]
         audits.extend(_delete_audit_from_row(row) for row in delete_rows)
         audits.sort(key=lambda audit: audit.created_at, reverse=True)
-        return audits[:limit]
+        return audits[offset:offset + limit], total
 
     def scrub_deleted_memory_from_audits(self, *, session: str, memory_ids: list[str]) -> None:
         """从查询审计中清理已硬删除记忆的原文片段。"""

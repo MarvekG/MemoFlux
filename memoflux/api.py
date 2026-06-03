@@ -149,13 +149,30 @@ def create_app(*, repository=None, llm_client=None, embedding_client=None, datab
         return _ok({"status": "ok", "db": "ok", "retrieval": "ok", "llm": "local", "retrieval_strategy": "text_time"})
 
     @app.get("/v1/preview")
-    def preview(session: str, limit: int = 50):
-        return _ok({"items": [_memory_payload(item, include_content=True) for item in service.preview(session=session, limit=limit)], "next_cursor": None})
+    def preview(session: str | None = None, limit: int = 50, offset: int = 0):
+        items, total = service.preview(session=session, limit=limit, offset=offset)
+        return _ok(
+            {
+                "items": [_memory_payload(item, include_content=True) for item in items],
+                "total": total,
+                "limit": limit,
+                "offset": offset,
+                "next_cursor": None,
+            }
+        )
 
     @app.get("/v1/audits")
-    def audits(session: str, query_id: str | None = None, limit: int = 50):
-        items = service.repository.list_audits(session=session, query_id=query_id, limit=limit)
-        return _ok({"items": [_audit_payload(item) for item in items], "next_cursor": None})
+    def audits(session: str | None = None, query_id: str | None = None, limit: int = 50, offset: int = 0):
+        items, total = service.repository.list_audits(session=session, query_id=query_id, limit=limit, offset=offset)
+        return _ok(
+            {
+                "items": [_audit_payload(item) for item in items],
+                "total": total,
+                "limit": limit,
+                "offset": offset,
+                "next_cursor": None,
+            }
+        )
 
     @app.get("/v1/usage/stats")
     def usage_stats():
