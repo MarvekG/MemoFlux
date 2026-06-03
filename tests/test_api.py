@@ -220,9 +220,9 @@ class HistoryOnlyListRepository(MemoryRepository):
             )
         ]
 
-    def list_memories(self, *, session: str, limit: int):
+    def list_memories(self, *, session: str, limit: int, offset: int = 0):
         self.list_limits.append(limit)
-        return [
+        memories = [
             MemoryRecord(
                 memory_id="history-hit",
                 session=session,
@@ -231,6 +231,7 @@ class HistoryOnlyListRepository(MemoryRepository):
                 created_at=datetime(2026, 5, 2, 10, tzinfo=UTC),
             )
         ]
+        return memories[offset:offset + limit], len(memories)
 
 
 class HistoryQueryLLMClient(FakeLLMClient):
@@ -386,6 +387,60 @@ def test_ingest_recall_delete_and_preview_flow():
     )
     assert after_delete_response.status_code == 200
     assert after_delete_response.json()["data"]["references"] == []
+
+
+def test_preview_without_session_returns_all_sessions():
+    app = create_app(repository=MemoryRepository(), embedding_client=FakeEmbeddingService())
+    from fastapi.testclient import TestClient
+
+    client = TestClient(app)
+    client.post(
+        "/v1/ingest",
+        json={
+            "session": "project:atlas",
+            "content": "Atlas 发布延期，因为数据库迁移回滚方案不完整。",
+            "occurred_at": "2026-05-01T10:00:00Z",
+        },
+    )
+    client.post(
+        "/v1/ingest",
+        json={
+            "session": "project:zephyr",
+            "content": "Zephyr 复盘发现浏览器缓存导致旧资源残留。",
+            "occurred_at": "2026-05-02T10:00:00Z",
+        },
+    )
+
+    preview_response = client.get("/v1/preview")
+
+    assert preview_response.status_code == 200
+    items = preview_response.json()["data"]["items"]
+    assert [item["session"] for item in items] == ["project:atlas", "project:zephyr"]
+
+
+def test_preview_uses_offset_and_returns_total():
+    app = create_app(repository=MemoryRepository(), embedding_client=FakeEmbeddingService())
+    from fastapi.testclient import TestClient
+
+    client = TestClient(app)
+    for index in range(1, 4):
+        client.post(
+            "/v1/ingest",
+            json={
+                "session": "project:atlas",
+                "content": f"Atlas 第 {index} 条复盘记忆。",
+                "occurred_at": f"2026-05-0{index}T10:00:00Z",
+            },
+        )
+
+    preview_response = client.get("/v1/preview", params={"session": "project:atlas", "limit": 1, "offset": 1})
+
+    assert preview_response.status_code == 200
+    data = preview_response.json()["data"]
+    assert data["total"] == 3
+    assert data["limit"] == 1
+    assert data["offset"] == 1
+    assert [item["content"] for item in data["items"]] == ["Atlas 第 2 条复盘记忆。"]
 
 
 def test_history_recall_orders_candidates_by_occurred_at():
@@ -563,10 +618,12 @@ def test_retention_repository_deletes_by_occurred_at():
         "session:a": [old_a.memory_id],
         "session:b": [old_b.memory_id],
     }
-    assert [memory.memory_id for memory in repository.list_memories(session="session:a", limit=10)] == [
+    session_a_memories, _ = repository.list_memories(session="session:a", limit=10)
+    session_b_memories, _ = repository.list_memories(session="session:b", limit=10)
+    assert [memory.memory_id for memory in session_a_memories] == [
         recent_a.memory_id
     ]
-    assert repository.list_memories(session="session:b", limit=10) == []
+    assert session_b_memories == []
 
 
 def test_cleanup_expired_memories_records_delete_audits_and_scrubs_queries():
@@ -601,8 +658,8 @@ def test_cleanup_expired_memories_records_delete_audits_and_scrubs_queries():
     assert result["sessions"] == 2
     assert result["retention_days"] == 180
     assert "cutoff_occurred_at" in result
-    session_a_audits = repository.list_audits(session="session:a", limit=10)
-    session_b_audits = repository.list_audits(session="session:b", limit=10)
+    session_a_audits, _ = repository.list_audits(session="session:a", limit=10)
+    session_b_audits, _ = repository.list_audits(session="session:b", limit=10)
     session_a_delete = next(item for item in session_a_audits if item.delete_id)
     session_b_delete = next(item for item in session_b_audits if item.delete_id)
     assert session_a_delete.target["mode"] == "retention_cleanup"
@@ -613,7 +670,8 @@ def test_cleanup_expired_memories_records_delete_audits_and_scrubs_queries():
     assert old_items[0]["content_preview"] is None
     assert query_audit.final_answer is None
     assert old_memory_id not in query_audit.selection_reasons
-    assert [memory.content for memory in repository.list_memories(session="session:a", limit=10)] == ["Atlas 新记忆。"]
+    session_a_memories, _ = repository.list_memories(session="session:a", limit=10)
+    assert [memory.content for memory in session_a_memories] == ["Atlas 新记忆。"]
 
 
 def test_recall_uses_configured_llm_without_returning_usage():
@@ -1051,6 +1109,51 @@ def test_audits_are_session_isolated_and_support_query_id_lookup():
 
     cross_session_detail = client.get("/v1/audits", params={"session": "session:b", "query_id": query_a})
     assert cross_session_detail.json()["data"]["items"] == []
+
+
+def test_audits_without_session_returns_all_sessions():
+    llm_client = FakeLLMClient()
+    app = create_app(repository=MemoryRepository(), llm_client=llm_client, embedding_client=FakeEmbeddingService())
+    from fastapi.testclient import TestClient
+
+    client = TestClient(app)
+    client.post("/v1/ingest", json={"session": "session:a", "content": "A 项目延期。", "occurred_at": "2026-05-01T10:00:00Z"})
+    client.post("/v1/ingest", json={"session": "session:b", "content": "B 项目延期。", "occurred_at": "2026-05-02T10:00:00Z"})
+    client.post("/v1/recall", json={"session": "session:a", "query": "A 为什么延期？"})
+    client.post("/v1/recall", json={"session": "session:b", "query": "B 为什么延期？"})
+
+    audits_response = client.get("/v1/audits")
+
+    assert audits_response.status_code == 200
+    sessions = {item["session"] for item in audits_response.json()["data"]["items"]}
+    assert sessions == {"session:a", "session:b"}
+
+
+def test_audits_use_offset_and_return_total():
+    llm_client = FakeLLMClient()
+    app = create_app(repository=MemoryRepository(), llm_client=llm_client, embedding_client=FakeEmbeddingService())
+    from fastapi.testclient import TestClient
+
+    client = TestClient(app)
+    for index in range(1, 4):
+        client.post(
+            "/v1/ingest",
+            json={
+                "session": "session:a",
+                "content": f"A 项目第 {index} 条延期复盘。",
+                "occurred_at": f"2026-05-0{index}T10:00:00Z",
+            },
+        )
+        client.post("/v1/recall", json={"session": "session:a", "query": f"A 第 {index} 次为什么延期？"})
+
+    audits_response = client.get("/v1/audits", params={"session": "session:a", "limit": 1, "offset": 1})
+
+    assert audits_response.status_code == 200
+    data = audits_response.json()["data"]
+    assert data["total"] == 3
+    assert data["limit"] == 1
+    assert data["offset"] == 1
+    assert len(data["items"]) == 1
 
 
 def test_settings_use_memoflux_embedding_configuration(monkeypatch):

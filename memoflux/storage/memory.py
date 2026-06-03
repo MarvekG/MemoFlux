@@ -66,12 +66,12 @@ class MemoryRepository:
                 del self._memories[memory_id]
         return grouped
 
-    def list_memories(self, *, session: str, limit: int) -> list[MemoryRecord]:
-        """列出同一 session 内的原始记忆。"""
+    def list_memories(self, *, session: str | None, limit: int, offset: int = 0) -> tuple[list[MemoryRecord], int]:
+        """列出原始记忆，未指定 session 时返回所有 session。"""
 
-        memories = [memory for memory in self._memories.values() if memory.session == session]
+        memories = [memory for memory in self._memories.values() if session is None or memory.session == session]
         memories.sort(key=lambda memory: memory.occurred_at)
-        return memories[:limit]
+        return memories[offset:offset + limit], len(memories)
 
     def record_usage(
         self,
@@ -138,21 +138,23 @@ class MemoryRepository:
     def list_audits(
         self,
         *,
-        session: str,
+        session: str | None,
         limit: int,
+        offset: int = 0,
         query_id: str | None = None,
-    ) -> list[QueryAuditRecord | DeleteAuditRecord]:
-        """列出同一 session 内的查询和删除审计。"""
+    ) -> tuple[list[QueryAuditRecord | DeleteAuditRecord], int]:
+        """列出查询和删除审计，未指定 session 时返回所有 session。"""
 
         if query_id:
             audit = self._query_audits.get(query_id)
-            return [audit] if audit and audit.session == session else []
+            items = [audit] if audit and (session is None or audit.session == session) else []
+            return items[offset:offset + limit], len(items)
         audits: list[QueryAuditRecord | DeleteAuditRecord] = [
-            audit for audit in self._query_audits.values() if audit.session == session
+            audit for audit in self._query_audits.values() if session is None or audit.session == session
         ]
-        audits.extend(audit for audit in self._delete_audits.values() if audit.session == session)
+        audits.extend(audit for audit in self._delete_audits.values() if session is None or audit.session == session)
         audits.sort(key=lambda audit: audit.created_at, reverse=True)
-        return audits[:limit]
+        return audits[offset:offset + limit], len(audits)
 
     def scrub_deleted_memory_from_audits(self, *, session: str, memory_ids: list[str]) -> None:
         """从审计记录中清理已硬删除记忆的原文片段。"""

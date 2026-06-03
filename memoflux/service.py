@@ -77,7 +77,8 @@ class MemoFluxService:
                     query_embedding=query_embedding.output.get("embedding"),
                 )
             )
-        memory_batches.append(self.repository.list_memories(session=session, limit=candidate_limit))
+        listed_memories, _ = self.repository.list_memories(session=session, limit=candidate_limit)
+        memory_batches.append(listed_memories)
         memories = _merge_memories_by_id(memory_batches, limit=candidate_limit)
         self.repository.record_usage(
             operation="query_planner",
@@ -226,10 +227,10 @@ class MemoFluxService:
         )
         return DeleteResult(delete_id=delete_id, matched_memory_ids=matched, affected_memory_ids=matched, status="ok")
 
-    def preview(self, *, session: str, limit: int = 50):
-        """预览同一 session 内的原始记忆。"""
+    def preview(self, *, session: str | None = None, limit: int = 50, offset: int = 0):
+        """预览原始记忆，未指定 session 时返回所有 session。"""
 
-        return self.repository.list_memories(session=session, limit=limit)
+        return self.repository.list_memories(session=session, limit=limit, offset=offset)
 
     def usage_stats(self):
         """返回聚合用量统计。"""
