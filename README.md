@@ -71,11 +71,10 @@ MemoFlux 提供一组简单的 HTTP 接口，用于长期记忆工作流：
 核心配置：
 
 ```bash
-MEMOFLUX_DATABASE_URL=postgresql+psycopg2://tradeuser:tradepassword@memo-postgres:5432/memory
-MEMOFLUX_DATABASE_SCHEMA=memoflux
 MEMOFLUX_SERVICE_PORT=8020
-MEMOFLUX_APP_RELOAD=true
 ```
+
+默认数据库连接为 `postgresql+asyncpg://tradeuser:tradepassword@memo-postgres:5432/memory`，通常不需要在 `.env` 中配置。
 
 LLM 配置：
 
@@ -91,9 +90,9 @@ MEMOFLUX_LLM_MODEL=memory
 MEMOFLUX_EMBEDDING_PROVIDER=local
 MEMOFLUX_EMBEDDING_MODEL=BAAI/bge-base-zh-v1.5
 MEMOFLUX_EMBEDDING_DIM=768
-MEMOFLUX_EMBEDDING_CACHE_DIR=/home/memo/.memoflux/data/models
-MEMOFLUX_EMBEDDING_PREWARM_ON_STARTUP=true
 ```
+
+官方镜像在构建阶段会把默认向量模型下载到 `/home/memo/.memoflux/data/models`，运行时默认只读取本地权重，不再联网下载。
 
 OpenAI 兼容向量接口配置：
 
@@ -123,10 +122,9 @@ docker compose up -d
 - MemoFlux API：`http://127.0.0.1:8020`
 - PostgreSQL：host port `5433`
 
-如果直接使用当前 `memo/docker-compose.yml`，需要让 `.env` 匹配独立 Docker Compose 中的数据库和容器端口：
+如果直接使用当前 `memo/docker-compose.yml`，只需要在 `.env` 中按需调整容器端口：
 
 ```bash
-MEMOFLUX_DATABASE_URL=postgresql+psycopg2://memouser:memopassword@memo-postgres:5432/memo
 MEMOFLUX_SERVICE_PORT=8010
 ```
 

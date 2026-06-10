@@ -1,3 +1,5 @@
+import asyncio
+import inspect
 from datetime import UTC, datetime
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -11,11 +13,17 @@ from memoflux.service import MemoFluxService
 from memoflux.storage.memory import MemoryRepository
 
 
+def run_async(coro):
+    """在同步 pytest 用例中执行异步调用。"""
+
+    return asyncio.run(coro)
+
+
 class FakeLLMClient:
     def __init__(self) -> None:
         self.calls = []
 
-    def plan_query(self, *, query: str) -> LLMResult:
+    async def plan_query(self, *, query: str) -> LLMResult:
         self.calls.append(("plan_query", query))
         return LLMResult(
             output={"rewritten_queries": [query]},
@@ -24,7 +32,7 @@ class FakeLLMClient:
             model="fake",
         )
 
-    def synthesize_answer(self, *, query: str, memories: list) -> LLMResult:
+    async def synthesize_answer(self, *, query: str, memories: list) -> LLMResult:
         self.calls.append(("synthesize_answer", query, len(memories)))
         memory_ids = [memory.memory_id for memory in memories]
         return LLMResult(
@@ -40,13 +48,13 @@ class FakeLLMClient:
             model="fake",
         )
 
-    def run_prompt(self, *, prompt_key: str, payload: dict) -> LLMResult:
+    async def run_prompt(self, *, prompt_key: str, payload: dict) -> LLMResult:
         self.calls.append(("run_prompt", prompt_key))
         return LLMResult(output={"prompt_key": prompt_key, "payload": payload}, input_tokens=3, output_tokens=4, model="fake")
 
 
 class StringConfidenceLLMClient(FakeLLMClient):
-    def synthesize_answer(self, *, query: str, memories: list) -> LLMResult:
+    async def synthesize_answer(self, *, query: str, memories: list) -> LLMResult:
         self.calls.append(("synthesize_answer", query, len(memories)))
         return LLMResult(
             output={
@@ -62,7 +70,7 @@ class StringConfidenceLLMClient(FakeLLMClient):
 
 
 class SelectiveReferenceLLMClient(FakeLLMClient):
-    def synthesize_answer(self, *, query: str, memories: list) -> LLMResult:
+    async def synthesize_answer(self, *, query: str, memories: list) -> LLMResult:
         self.calls.append(("synthesize_answer", query, len(memories)))
         return LLMResult(
             output={
@@ -79,7 +87,7 @@ class SelectiveReferenceLLMClient(FakeLLMClient):
 
 
 class DiagnosticReferenceLLMClient(FakeLLMClient):
-    def synthesize_answer(self, *, query: str, memories: list) -> LLMResult:
+    async def synthesize_answer(self, *, query: str, memories: list) -> LLMResult:
         self.calls.append(("synthesize_answer", query, len(memories)))
         return LLMResult(
             output={
@@ -98,7 +106,7 @@ class DiagnosticReferenceLLMClient(FakeLLMClient):
 
 
 class NoEvidenceLLMClient(FakeLLMClient):
-    def synthesize_answer(self, *, query: str, memories: list) -> LLMResult:
+    async def synthesize_answer(self, *, query: str, memories: list) -> LLMResult:
         self.calls.append(("synthesize_answer", query, len(memories)))
         return LLMResult(
             output={
@@ -115,7 +123,7 @@ class NoEvidenceLLMClient(FakeLLMClient):
 
 
 class RewrittenQueryLLMClient(FakeLLMClient):
-    def plan_query(self, *, query: str) -> LLMResult:
+    async def plan_query(self, *, query: str) -> LLMResult:
         self.calls.append(("plan_query", query))
         return LLMResult(
             output={"rewritten_queries": ["Atlas 延期原因", "Atlas 数据库回滚风险"]},
@@ -130,7 +138,7 @@ class CountingLLMClient(FakeLLMClient):
         super().__init__()
         self.synthesis_candidate_count = 0
 
-    def synthesize_answer(self, *, query: str, memories: list) -> LLMResult:
+    async def synthesize_answer(self, *, query: str, memories: list) -> LLMResult:
         self.synthesis_candidate_count = len(memories)
         return LLMResult(
             output={
@@ -147,7 +155,7 @@ class CountingLLMClient(FakeLLMClient):
 
 
 class AuditCountingLLMClient(CountingLLMClient):
-    def synthesize_answer(self, *, query: str, memories: list) -> LLMResult:
+    async def synthesize_answer(self, *, query: str, memories: list) -> LLMResult:
         self.synthesis_candidate_count = len(memories)
         return LLMResult(
             output={
@@ -164,7 +172,7 @@ class AuditCountingLLMClient(CountingLLMClient):
 
 
 class ExpandedCandidateRepository(MemoryRepository):
-    def search_memories(self, *, session: str, terms: set[str], limit: int, query_embedding=None):
+    async def search_memories(self, *, session: str, terms: set[str], limit: int, query_embedding=None):
         return [
             MemoryRecord(
                 memory_id=f"m{index}",
@@ -178,7 +186,7 @@ class ExpandedCandidateRepository(MemoryRepository):
 
 
 class DependencyCandidateRepository(MemoryRepository):
-    def search_memories(self, *, session: str, terms: set[str], limit: int, query_embedding=None):
+    async def search_memories(self, *, session: str, terms: set[str], limit: int, query_embedding=None):
         return [
             MemoryRecord(
                 memory_id="older-current",
@@ -209,7 +217,7 @@ class HistoryOnlyListRepository(MemoryRepository):
         super().__init__()
         self.list_limits = []
 
-    def search_memories(self, *, session: str, terms: set[str], limit: int, query_embedding=None):
+    async def search_memories(self, *, session: str, terms: set[str], limit: int, query_embedding=None):
         return [
             MemoryRecord(
                 memory_id="vector-noise",
@@ -220,7 +228,7 @@ class HistoryOnlyListRepository(MemoryRepository):
             )
         ]
 
-    def list_memories(self, *, session: str, limit: int, offset: int = 0):
+    async def list_memories(self, *, session: str, limit: int, offset: int = 0):
         self.list_limits.append(limit)
         memories = [
             MemoryRecord(
@@ -235,7 +243,7 @@ class HistoryOnlyListRepository(MemoryRepository):
 
 
 class HistoryQueryLLMClient(FakeLLMClient):
-    def plan_query(self, *, query: str) -> LLMResult:
+    async def plan_query(self, *, query: str) -> LLMResult:
         self.calls.append(("plan_query", query))
         return LLMResult(
             output={"rewritten_queries": [query]},
@@ -244,7 +252,7 @@ class HistoryQueryLLMClient(FakeLLMClient):
             model="fake",
         )
 
-    def synthesize_answer(self, *, query: str, memories: list) -> LLMResult:
+    async def synthesize_answer(self, *, query: str, memories: list) -> LLMResult:
         self.calls.append(("synthesize_answer", query, [memory.memory_id for memory in memories]))
         memory_ids = [memory.memory_id for memory in memories if memory.memory_id == "history-hit"]
         return LLMResult(
@@ -266,7 +274,7 @@ class FakeChatLLMClient(OpenAICompatibleLLMClient):
         super().__init__(base_url="http://unused", api_key="unused", model="fake")
         self.content = content
 
-    def _chat(self, messages: list[dict[str, str]], **_) -> LLMResult:
+    async def _chat(self, messages: list[dict[str, str]], **_) -> LLMResult:
         return LLMResult(output={"content": self.content}, input_tokens=10, output_tokens=5, model="fake")
 
 
@@ -304,22 +312,15 @@ class FakeEmbeddingService:
     def __init__(self) -> None:
         self.calls = []
         self.batch_calls = []
-        self.prewarm_calls = 0
 
-    def embed_text(self, text: str) -> list[float]:
+    async def embed_text(self, text: str) -> list[float]:
         self.calls.append(text)
         return [0.1, 0.2, 0.3]
 
-    def embed_texts(self, texts: list[str]) -> list[list[float]]:
+    async def embed_texts(self, texts: list[str]) -> list[list[float]]:
         self.batch_calls.append(list(texts))
         self.calls.extend(texts)
         return [[0.1, 0.2, 0.3] for _ in texts]
-
-    def prewarm_local_model(self) -> None:
-        if not load_settings().embedding_prewarm_on_startup:
-            return
-        self.prewarm_calls += 1
-
 
 class VectorAwareMemoryRepository(MemoryRepository):
     def __init__(self) -> None:
@@ -327,13 +328,13 @@ class VectorAwareMemoryRepository(MemoryRepository):
         self.insert_embeddings = []
         self.search_embeddings = []
 
-    def insert_memory(self, *, session: str, content: str, occurred_at, embedding=None):
+    async def insert_memory(self, *, session: str, content: str, occurred_at, embedding=None):
         self.insert_embeddings.append(embedding)
-        return super().insert_memory(session=session, content=content, occurred_at=occurred_at)
+        return await super().insert_memory(session=session, content=content, occurred_at=occurred_at)
 
-    def search_memories(self, *, session: str, terms: set[str], limit: int, query_embedding=None):
+    async def search_memories(self, *, session: str, terms: set[str], limit: int, query_embedding=None):
         self.search_embeddings.append(query_embedding)
-        return super().search_memories(session=session, terms=terms, limit=limit)
+        return await super().search_memories(session=session, terms=terms, limit=limit)
 
 
 def test_ingest_recall_delete_and_preview_flow():
@@ -535,6 +536,31 @@ def test_general_i18n_endpoint_is_not_exposed():
     assert response.status_code == 404
 
 
+def test_business_api_routes_are_async():
+    app = create_app(repository=MemoryRepository(), embedding_client=FakeEmbeddingService())
+    expected_routes = {
+        ("/v1/ingest", "POST"),
+        ("/v1/recall", "POST"),
+        ("/v1/delete", "POST"),
+        ("/v1/i18n/{lang}", "GET"),
+        ("/v1/prompt-eval", "POST"),
+        ("/v1/health", "GET"),
+        ("/v1/preview", "GET"),
+        ("/v1/audits", "GET"),
+        ("/v1/usage/stats", "GET"),
+        ("/v1/usage/stats", "DELETE"),
+    }
+    route_endpoints = {
+        (route.path, method): route.endpoint
+        for route in app.routes
+        for method in getattr(route, "methods", set())
+        if (route.path, method) in expected_routes
+    }
+
+    assert set(route_endpoints) == expected_routes
+    assert all(inspect.iscoroutinefunction(endpoint) for endpoint in route_endpoints.values())
+
+
 def test_http_error_uses_accept_language():
     app = create_app(repository=MemoryRepository(), embedding_client=FakeEmbeddingService())
     from fastapi.testclient import TestClient
@@ -590,10 +616,10 @@ def test_usage_stats_are_aggregate_only():
 
 def test_usage_stats_include_cached_tokens_and_hit_rate():
     repository = MemoryRepository()
-    repository.record_usage(operation="query_planner", input_tokens=100, output_tokens=20, cached_tokens=30)
-    repository.record_usage(operation="answer_synthesizer", input_tokens=50, output_tokens=10, cached_tokens=10)
+    run_async(repository.record_usage(operation="query_planner", input_tokens=100, output_tokens=20, cached_tokens=30))
+    run_async(repository.record_usage(operation="answer_synthesizer", input_tokens=50, output_tokens=10, cached_tokens=10))
 
-    stats = repository.usage_stats()
+    stats = run_async(repository.usage_stats())
 
     assert stats.input_tokens == 150
     assert stats.cached_tokens == 40
@@ -608,18 +634,18 @@ def test_retention_repository_deletes_by_occurred_at():
     old_at = datetime(2025, 1, 1, 10, 0, tzinfo=UTC)
     cutoff = datetime(2025, 7, 1, 0, 0, tzinfo=UTC)
     recent_at = datetime(2025, 7, 2, 10, 0, tzinfo=UTC)
-    old_a = repository.insert_memory(session="session:a", content="A 旧记忆。", occurred_at=old_at)
-    old_b = repository.insert_memory(session="session:b", content="B 旧记忆。", occurred_at=old_at)
-    recent_a = repository.insert_memory(session="session:a", content="A 新记忆。", occurred_at=recent_at)
+    old_a = run_async(repository.insert_memory(session="session:a", content="A 旧记忆。", occurred_at=old_at))
+    old_b = run_async(repository.insert_memory(session="session:b", content="B 旧记忆。", occurred_at=old_at))
+    recent_a = run_async(repository.insert_memory(session="session:a", content="A 新记忆。", occurred_at=recent_at))
 
-    deleted = repository.delete_memories_before_occurred_at(cutoff)
+    deleted = run_async(repository.delete_memories_before_occurred_at(cutoff))
 
     assert deleted == {
         "session:a": [old_a.memory_id],
         "session:b": [old_b.memory_id],
     }
-    session_a_memories, _ = repository.list_memories(session="session:a", limit=10)
-    session_b_memories, _ = repository.list_memories(session="session:b", limit=10)
+    session_a_memories, _ = run_async(repository.list_memories(session="session:a", limit=10))
+    session_b_memories, _ = run_async(repository.list_memories(session="session:b", limit=10))
     assert [memory.memory_id for memory in session_a_memories] == [
         recent_a.memory_id
     ]
@@ -651,15 +677,15 @@ def test_cleanup_expired_memories_records_delete_audits_and_scrubs_queries():
     other_old_memory_id = other_old_response.json()["data"]["memory_id"]
     client.post("/v1/recall", json={"session": "session:a", "query": "Atlas 有哪些记忆？", "top_k": 2})
 
-    result = service.cleanup_expired_memories(retention_days=180)
+    result = run_async(service.cleanup_expired_memories(retention_days=180))
 
     assert result["status"] == "ok"
     assert result["deleted"] == 2
     assert result["sessions"] == 2
     assert result["retention_days"] == 180
     assert "cutoff_occurred_at" in result
-    session_a_audits, _ = repository.list_audits(session="session:a", limit=10)
-    session_b_audits, _ = repository.list_audits(session="session:b", limit=10)
+    session_a_audits, _ = run_async(repository.list_audits(session="session:a", limit=10))
+    session_b_audits, _ = run_async(repository.list_audits(session="session:b", limit=10))
     session_a_delete = next(item for item in session_a_audits if item.delete_id)
     session_b_delete = next(item for item in session_b_audits if item.delete_id)
     assert session_a_delete.target["mode"] == "retention_cleanup"
@@ -670,7 +696,7 @@ def test_cleanup_expired_memories_records_delete_audits_and_scrubs_queries():
     assert old_items[0]["content_preview"] is None
     assert query_audit.final_answer is None
     assert old_memory_id not in query_audit.selection_reasons
-    session_a_memories, _ = repository.list_memories(session="session:a", limit=10)
+    session_a_memories, _ = run_async(repository.list_memories(session="session:a", limit=10))
     assert [memory.content for memory in session_a_memories] == ["Atlas 新记忆。"]
 
 
@@ -814,7 +840,7 @@ def test_openai_synthesizer_invalid_json_fails_closed():
         created_at=datetime(2026, 5, 1, 10, tzinfo=UTC),
     )
 
-    result = llm_client.synthesize_answer(query="Hydra 当前延期原因是什么？", memories=[memory])
+    result = run_async(llm_client.synthesize_answer(query="Hydra 当前延期原因是什么？", memories=[memory]))
 
     assert result.output == {
         "answer": "当前 session 中没有足够记忆支持回答该问题。",
@@ -837,7 +863,7 @@ def test_openai_synthesizer_invalid_schema_fails_closed():
         created_at=datetime(2026, 5, 1, 10, tzinfo=UTC),
     )
 
-    result = llm_client.synthesize_answer(query="Hydra 当前延期原因是什么？", memories=[memory])
+    result = run_async(llm_client.synthesize_answer(query="Hydra 当前延期原因是什么？", memories=[memory]))
 
     assert result.output == {
         "answer": "当前 session 中没有足够记忆支持回答该问题。",
@@ -854,7 +880,7 @@ def test_openai_client_uses_deterministic_temperature():
     llm_client = CapturePayloadLLMClient()
 
     with patch("urllib.request.urlopen", llm_client.capture_urlopen):
-        llm_client.plan_query(query="q")
+        run_async(llm_client.plan_query(query="q"))
 
     assert llm_client.payload is not None
     assert llm_client.payload["temperature"] == 0.0
@@ -870,7 +896,7 @@ def test_openai_client_extracts_cached_and_reasoning_tokens():
     }
 
     with patch("urllib.request.urlopen", llm_client.capture_urlopen):
-        result = llm_client.plan_query(query="q")
+        result = run_async(llm_client.plan_query(query="q"))
 
     assert result.input_tokens == 100
     assert result.output_tokens == 20
@@ -889,7 +915,7 @@ def test_openai_client_injects_pydantic_schema_into_answer_synthesis_prompt():
     )
 
     with patch("urllib.request.urlopen", llm_client.capture_urlopen):
-        llm_client.synthesize_answer(query="Atlas 当前依赖哪个服务？", memories=[memory])
+        run_async(llm_client.synthesize_answer(query="Atlas 当前依赖哪个服务？", memories=[memory]))
 
     assert llm_client.payload is not None
     assert "response_format" not in llm_client.payload
@@ -903,7 +929,7 @@ def test_openai_client_injects_rewrite_only_schema_into_query_plan_prompt():
     llm_client = CapturePayloadLLMClient()
 
     with patch("urllib.request.urlopen", llm_client.capture_urlopen):
-        llm_client.plan_query(query="Atlas 当前依赖哪个服务？")
+        run_async(llm_client.plan_query(query="Atlas 当前依赖哪个服务？"))
 
     assert llm_client.payload is not None
     assert "response_format" not in llm_client.payload
@@ -1186,22 +1212,7 @@ def test_retention_cleanup_settings_defaults(monkeypatch):
     assert settings.memory_cleanup_minute == 15
 
 
-def test_app_lifespan_schedules_embedding_prewarm(monkeypatch):
-    monkeypatch.setenv("MEMOFLUX_EMBEDDING_PREWARM_ON_STARTUP", "true")
-    fake_embedding_service = FakeEmbeddingService()
-    app = create_app(repository=MemoryRepository(), embedding_client=fake_embedding_service)
-
-    from fastapi.testclient import TestClient
-
-    with TestClient(app) as client:
-        response = client.get("/v1/health")
-
-    assert response.status_code == 200
-    assert fake_embedding_service.prewarm_calls == 1
-
-
 def test_create_app_does_not_start_retention_cleanup_when_disabled(monkeypatch):
-    monkeypatch.setenv("MEMOFLUX_EMBEDDING_PREWARM_ON_STARTUP", "false")
     monkeypatch.setenv("MEMOFLUX_MEMORY_CLEANUP_ENABLED", "false")
     created_tasks = []
 
@@ -1231,32 +1242,90 @@ def test_create_app_does_not_start_retention_cleanup_when_disabled(monkeypatch):
     assert created_tasks == []
 
 
-def test_app_lifespan_skips_embedding_prewarm_when_disabled(monkeypatch):
-    monkeypatch.setenv("MEMOFLUX_EMBEDDING_PREWARM_ON_STARTUP", "false")
-    fake_embedding_service = FakeEmbeddingService()
-    app = create_app(repository=MemoryRepository(), embedding_client=fake_embedding_service)
-
-    from fastapi.testclient import TestClient
-
-    with TestClient(app) as client:
-        response = client.get("/v1/health")
-
-    assert response.status_code == 200
-    assert fake_embedding_service.prewarm_calls == 0
-
-
-def test_embedding_prewarm_skips_non_local_provider(monkeypatch):
+def test_local_embedding_sets_cache_environment(monkeypatch, tmp_path):
     from memoflux.services.embedding_service import EmbeddingService
 
-    monkeypatch.setenv("MEMOFLUX_EMBEDDING_PREWARM_ON_STARTUP", "true")
-    monkeypatch.setenv("MEMOFLUX_EMBEDDING_PROVIDER", "openai_compatible")
+    cache_dir = tmp_path / "models"
+    monkeypatch.setenv("MEMOFLUX_EMBEDDING_PROVIDER", "local")
+    monkeypatch.setenv("MEMOFLUX_EMBEDDING_CACHE_DIR", str(cache_dir))
     service = EmbeddingService()
-    load_calls = []
-    monkeypatch.setattr(service, "_load_local_model", lambda: load_calls.append("loaded"))
 
-    service.prewarm_local_model()
+    class FakeSentenceTransformer:
+        def __init__(self, model, **kwargs):
+            self.model = model
+            self.kwargs = kwargs
 
-    assert load_calls == []
+    import types
+    import sys
+
+    monkeypatch.setitem(
+        sys.modules,
+        "sentence_transformers",
+        types.SimpleNamespace(SentenceTransformer=FakeSentenceTransformer),
+    )
+
+    service._load_local_model()
+
+    assert cache_dir.exists()
+    assert service._local_model.kwargs["cache_folder"] == str(cache_dir)
+
+
+def test_local_embedding_uses_local_weights_by_default(monkeypatch, tmp_path):
+    from memoflux.services.embedding_service import EmbeddingService
+
+    monkeypatch.setenv("MEMOFLUX_EMBEDDING_PROVIDER", "local")
+    monkeypatch.setenv("MEMOFLUX_EMBEDDING_CACHE_DIR", str(tmp_path / "models"))
+    service = EmbeddingService()
+
+    class FakeSentenceTransformer:
+        def __init__(self, model, **kwargs):
+            self.model = model
+            self.kwargs = kwargs
+
+    import types
+    import sys
+
+    monkeypatch.setitem(
+        sys.modules,
+        "sentence_transformers",
+        types.SimpleNamespace(SentenceTransformer=FakeSentenceTransformer),
+    )
+
+    service._load_local_model()
+
+    assert service._local_model.kwargs["local_files_only"] is True
+
+
+def test_local_embedding_loads_cached_snapshot_path(monkeypatch, tmp_path):
+    from memoflux.services.embedding_service import EmbeddingService
+
+    cache_dir = tmp_path / "models"
+    snapshot_dir = cache_dir / "models--BAAI--bge-base-zh-v1.5" / "snapshots" / "revision"
+    snapshot_dir.mkdir(parents=True)
+    (snapshot_dir / "config.json").write_text("{}", encoding="utf-8")
+    (snapshot_dir / "modules.json").write_text("[]", encoding="utf-8")
+    monkeypatch.setenv("MEMOFLUX_EMBEDDING_PROVIDER", "local")
+    monkeypatch.setenv("MEMOFLUX_EMBEDDING_MODEL", "BAAI/bge-base-zh-v1.5")
+    monkeypatch.setenv("MEMOFLUX_EMBEDDING_CACHE_DIR", str(cache_dir))
+    service = EmbeddingService()
+
+    class FakeSentenceTransformer:
+        def __init__(self, model, **kwargs):
+            self.model = model
+            self.kwargs = kwargs
+
+    import types
+    import sys
+
+    monkeypatch.setitem(
+        sys.modules,
+        "sentence_transformers",
+        types.SimpleNamespace(SentenceTransformer=FakeSentenceTransformer),
+    )
+
+    service._load_local_model()
+
+    assert service._local_model.model == str(snapshot_dir)
 
 
 def test_default_embedding_provider_is_local_with_configured_dimension(monkeypatch):
@@ -1302,7 +1371,7 @@ def test_local_embedding_uses_configured_dimension():
     service._local_model = types.SimpleNamespace(
         encode=lambda texts, **_: [[0.0] * service.dimension for _ in texts]
     )
-    result = service.embed_text("hello")
+    result = run_async(service.embed_text("hello"))
 
     assert len(result) == 768
 
@@ -1414,23 +1483,23 @@ def test_postgres_scrub_uses_session_value_in_query(monkeypatch):
         def __init__(self, engine):
             self.engine = engine
 
-        def __enter__(self):
+        async def __aenter__(self):
             return self
 
-        def __exit__(self, exc_type, exc, tb):
+        async def __aexit__(self, exc_type, exc, tb):
             return False
 
-        def scalars(self, statement):
+        async def scalars(self, statement):
             captured.update(statement.compile().params)
             return FakeScalarResult()
 
-        def commit(self):
+        async def commit(self):
             return None
 
     repository = postgres.PostgresMemoryRepository.__new__(postgres.PostgresMemoryRepository)
     repository.engine = object()
-    monkeypatch.setattr(postgres, "Session", FakeDbSession)
+    monkeypatch.setattr(postgres, "AsyncSession", FakeDbSession)
 
-    repository.scrub_deleted_memory_from_audits(session="session:test", memory_ids=["m1"])
+    run_async(repository.scrub_deleted_memory_from_audits(session="session:test", memory_ids=["m1"]))
 
     assert captured == {"session_1": "session:test"}

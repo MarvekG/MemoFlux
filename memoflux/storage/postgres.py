@@ -3,9 +3,8 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from uuid import uuid4
 
-from sqlalchemy import create_engine, delete, func, or_, select, text
-from sqlalchemy.engine import Engine
-from sqlalchemy.orm import Session
+from sqlalchemy import delete, func, or_, select, text
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, create_async_engine
 from sqlalchemy.schema import CreateSchema
 from pgvector.sqlalchemy import Vector
 
@@ -19,23 +18,22 @@ class PostgresMemoryRepository:
     def __init__(self, *, database_url: str, schema: str = "memoflux", embedding_dimension: int = 768) -> None:
         self.schema = schema
         self.embedding_dimension = embedding_dimension
-        self.engine: Engine = create_engine(database_url, future=True)
-        self.init_schema()
+        self.engine: AsyncEngine = create_async_engine(database_url, future=True)
 
-    def init_schema(self) -> None:
-        """初始化 MemoFlux 表结构。"""
+    async def init_schema(self) -> None:
+        """异步初始化 MemoFlux 表结构。"""
 
         Base.metadata.schema = self.schema
         for table in Base.metadata.tables.values():
             table.schema = self.schema
         MemoryRow.__table__.c.embedding.type = Vector(self.embedding_dimension)
-        with self.engine.begin() as conn:
-            conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
-            conn.execute(CreateSchema(self.schema, if_not_exists=True))
-        Base.metadata.create_all(bind=self.engine)
+        async with self.engine.begin() as conn:
+            await conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
+            await conn.execute(CreateSchema(self.schema, if_not_exists=True))
+            await conn.run_sync(Base.metadata.create_all)
 
-    def insert_memory(self, *, session: str, content: str, occurred_at: datetime, embedding=None) -> MemoryRecord:
-        """写入一条记忆。"""
+    async def insert_memory(self, *, session: str, content: str, occurred_at: datetime, embedding=None) -> MemoryRecord:
+        """异步写入一条记忆。"""
 
         row = MemoryRow(
             memory_id=uuid4().hex,
@@ -45,13 +43,13 @@ class PostgresMemoryRepository:
             occurred_at=occurred_at,
             created_at=datetime.now(tz=UTC),
         )
-        with Session(self.engine, expire_on_commit=False) as session:
-            session.add(row)
-            session.commit()
+        async with AsyncSession(self.engine, expire_on_commit=False) as db_session:
+            db_session.add(row)
+            await db_session.commit()
         return _memory_from_row(row)
 
-    def search_memories(self, *, session: str, terms: set[str], limit: int, query_embedding=None) -> list[MemoryRecord]:
-        """按 session 召回候选。"""
+    async def search_memories(self, *, session: str, terms: set[str], limit: int, query_embedding=None) -> list[MemoryRecord]:
+        """异步按 session 召回候选。"""
 
         statement = select(MemoryRow).where(MemoryRow.session == session)
         if query_embedding:
@@ -62,25 +60,25 @@ class PostgresMemoryRepository:
         else:
             return []
         statement = statement.limit(limit)
-        with Session(self.engine) as session:
-            rows = session.scalars(statement).all()
+        async with AsyncSession(self.engine) as db_session:
+            rows = list((await db_session.scalars(statement)).all())
         return [_memory_from_row(row) for row in rows]
 
-    def delete_memories(self, *, session: str, memory_ids: list[str]) -> list[str]:
-        """硬删除同一 session 内的记忆。"""
+    async def delete_memories(self, *, session: str, memory_ids: list[str]) -> list[str]:
+        """异步硬删除同一 session 内的记忆。"""
 
         if not memory_ids:
             return []
         select_statement = select(MemoryRow.memory_id).where(MemoryRow.session == session, MemoryRow.memory_id.in_(memory_ids))
         delete_statement = delete(MemoryRow).where(MemoryRow.session == session, MemoryRow.memory_id.in_(memory_ids))
-        with Session(self.engine) as session:
-            matched = list(session.scalars(select_statement).all())
-            session.execute(delete_statement)
-            session.commit()
+        async with AsyncSession(self.engine) as db_session:
+            matched = list((await db_session.scalars(select_statement)).all())
+            await db_session.execute(delete_statement)
+            await db_session.commit()
         return matched
 
-    def delete_memories_before_occurred_at(self, cutoff: datetime) -> dict[str, list[str]]:
-        """按发生时间硬删除过期记忆并按 session 返回删除 ID。
+    async def delete_memories_before_occurred_at(self, cutoff: datetime) -> dict[str, list[str]]:
+        """异步按发生时间硬删除过期记忆并按 session 返回删除 ID。
 
         Args:
             cutoff: 过期判断截止时间，早于该时间的记忆会被删除。
@@ -92,29 +90,29 @@ class PostgresMemoryRepository:
         select_statement = select(MemoryRow.session, MemoryRow.memory_id).where(MemoryRow.occurred_at < cutoff)
         delete_statement = delete(MemoryRow).where(MemoryRow.occurred_at < cutoff)
         grouped: dict[str, list[str]] = {}
-        with Session(self.engine) as session:
-            rows = session.execute(select_statement).all()
+        async with AsyncSession(self.engine) as db_session:
+            rows = (await db_session.execute(select_statement)).all()
             for memory_session, memory_id in rows:
                 grouped.setdefault(str(memory_session), []).append(str(memory_id))
             if grouped:
-                session.execute(delete_statement)
-            session.commit()
+                await db_session.execute(delete_statement)
+            await db_session.commit()
         return grouped
 
-    def list_memories(self, *, session: str | None, limit: int, offset: int = 0) -> tuple[list[MemoryRecord], int]:
-        """列出原始记忆，未指定 session 时返回所有 session。"""
+    async def list_memories(self, *, session: str | None, limit: int, offset: int = 0) -> tuple[list[MemoryRecord], int]:
+        """异步列出原始记忆，未指定 session 时返回所有 session。"""
 
         statement = select(MemoryRow).order_by(MemoryRow.occurred_at.asc()).offset(offset).limit(limit)
         count_statement = select(func.count(MemoryRow.memory_id))
         if session is not None:
             statement = statement.where(MemoryRow.session == session)
             count_statement = count_statement.where(MemoryRow.session == session)
-        with Session(self.engine) as session:
-            rows = session.scalars(statement).all()
-            total = int(session.scalar(count_statement) or 0)
+        async with AsyncSession(self.engine) as db_session:
+            rows = list((await db_session.scalars(statement)).all())
+            total = int((await db_session.scalar(count_statement)) or 0)
         return [_memory_from_row(row) for row in rows], total
 
-    def record_usage(
+    async def record_usage(
         self,
         *,
         operation: str,
@@ -123,7 +121,7 @@ class PostgresMemoryRepository:
         cached_tokens: int = 0,
         reasoning_tokens: int = 0,
     ) -> None:
-        """记录聚合 LLM 用量。"""
+        """异步记录聚合 LLM 用量。"""
 
         row = UsageRunRow(
             run_id=uuid4().hex,
@@ -134,12 +132,12 @@ class PostgresMemoryRepository:
             reasoning_tokens=reasoning_tokens,
             created_at=datetime.now(tz=UTC),
         )
-        with Session(self.engine) as session:
-            session.add(row)
-            session.commit()
+        async with AsyncSession(self.engine) as db_session:
+            db_session.add(row)
+            await db_session.commit()
 
-    def usage_stats(self) -> UsageStats:
-        """返回聚合用量统计。"""
+    async def usage_stats(self) -> UsageStats:
+        """异步返回聚合用量统计。"""
 
         statement = (
             select(
@@ -152,8 +150,8 @@ class PostgresMemoryRepository:
             )
             .group_by(UsageRunRow.operation)
         )
-        with Session(self.engine) as session:
-            rows = session.execute(statement).all()
+        async with AsyncSession(self.engine) as db_session:
+            rows = (await db_session.execute(statement)).all()
         by_operation = {
             operation: {
                 "calls": int(calls or 0),
@@ -183,31 +181,31 @@ class PostgresMemoryRepository:
             by_operation=by_operation,
         )
 
-    def clear_usage_stats(self) -> int:
-        """清空聚合用量统计。"""
+    async def clear_usage_stats(self) -> int:
+        """异步清空聚合用量统计。"""
 
-        with Session(self.engine) as session:
-            result = session.execute(delete(UsageRunRow))
-            session.commit()
+        async with AsyncSession(self.engine) as db_session:
+            result = await db_session.execute(delete(UsageRunRow))
+            await db_session.commit()
         return int(result.rowcount or 0)
 
-    def record_query_audit(self, audit: QueryAuditRecord) -> None:
-        """记录召回查询审计。"""
+    async def record_query_audit(self, audit: QueryAuditRecord) -> None:
+        """异步记录召回查询审计。"""
 
         row = QueryAuditRow(**audit.__dict__)
-        with Session(self.engine) as session:
-            session.add(row)
-            session.commit()
+        async with AsyncSession(self.engine) as db_session:
+            db_session.add(row)
+            await db_session.commit()
 
-    def record_delete_audit(self, audit: DeleteAuditRecord) -> None:
-        """记录删除操作审计。"""
+    async def record_delete_audit(self, audit: DeleteAuditRecord) -> None:
+        """异步记录删除操作审计。"""
 
         row = DeleteAuditRow(**{**audit.__dict__, "dry_run": int(audit.dry_run)})
-        with Session(self.engine) as session:
-            session.add(row)
-            session.commit()
+        async with AsyncSession(self.engine) as db_session:
+            db_session.add(row)
+            await db_session.commit()
 
-    def list_audits(
+    async def list_audits(
         self,
         *,
         session: str | None,
@@ -215,11 +213,11 @@ class PostgresMemoryRepository:
         offset: int = 0,
         query_id: str | None = None,
     ) -> tuple[list[QueryAuditRecord | DeleteAuditRecord], int]:
-        """列出查询和删除审计，未指定 session 时返回所有 session。"""
+        """异步列出查询和删除审计，未指定 session 时返回所有 session。"""
 
-        with Session(self.engine) as db_session:
+        async with AsyncSession(self.engine) as db_session:
             if query_id:
-                row = db_session.get(QueryAuditRow, query_id)
+                row = await db_session.get(QueryAuditRow, query_id)
                 items = [_query_audit_from_row(row)] if row and (session is None or row.session == session) else []
                 return items[offset:offset + limit], len(items)
             fetch_limit = offset + limit
@@ -232,26 +230,24 @@ class PostgresMemoryRepository:
                 delete_statement = delete_statement.where(DeleteAuditRow.session == session)
                 query_count_statement = query_count_statement.where(QueryAuditRow.session == session)
                 delete_count_statement = delete_count_statement.where(DeleteAuditRow.session == session)
-            query_rows = list(
-                db_session.scalars(query_statement).all()
+            query_rows = list((await db_session.scalars(query_statement)).all())
+            delete_rows = list((await db_session.scalars(delete_statement)).all())
+            total = int((await db_session.scalar(query_count_statement)) or 0) + int(
+                (await db_session.scalar(delete_count_statement)) or 0
             )
-            delete_rows = list(
-                db_session.scalars(delete_statement).all()
-            )
-            total = int(db_session.scalar(query_count_statement) or 0) + int(db_session.scalar(delete_count_statement) or 0)
         audits: list[QueryAuditRecord | DeleteAuditRecord] = [_query_audit_from_row(row) for row in query_rows]
         audits.extend(_delete_audit_from_row(row) for row in delete_rows)
         audits.sort(key=lambda audit: audit.created_at, reverse=True)
         return audits[offset:offset + limit], total
 
-    def scrub_deleted_memory_from_audits(self, *, session: str, memory_ids: list[str]) -> None:
-        """从查询审计中清理已硬删除记忆的原文片段。"""
+    async def scrub_deleted_memory_from_audits(self, *, session: str, memory_ids: list[str]) -> None:
+        """异步从查询审计中清理已硬删除记忆的原文片段。"""
 
         if not memory_ids:
             return
         deleted = set(memory_ids)
-        with Session(self.engine) as db_session:
-            rows = list(db_session.scalars(select(QueryAuditRow).where(QueryAuditRow.session == session)).all())
+        async with AsyncSession(self.engine) as db_session:
+            rows = list((await db_session.scalars(select(QueryAuditRow).where(QueryAuditRow.session == session))).all())
             for row in rows:
                 selected = set(row.selected_memory_ids or [])
                 row.retrieved = [
@@ -267,7 +263,7 @@ class PostgresMemoryRepository:
                 }
                 if selected & deleted:
                     row.final_answer = None
-            db_session.commit()
+            await db_session.commit()
 
 
 def _memory_from_row(row: MemoryRow) -> MemoryRecord:

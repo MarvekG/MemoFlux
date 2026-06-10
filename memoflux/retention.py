@@ -47,7 +47,7 @@ async def _memory_retention_cleanup_loop(
     while True:
         await asyncio.sleep(_seconds_until_next_run(schedule_hour=schedule_hour, schedule_minute=schedule_minute))
         try:
-            await asyncio.to_thread(service.cleanup_expired_memories, retention_days=retention_days)
+            await service.cleanup_expired_memories(retention_days=retention_days)
         except asyncio.CancelledError:
             raise
         except Exception:

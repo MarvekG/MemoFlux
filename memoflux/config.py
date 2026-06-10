@@ -7,7 +7,10 @@ from pydantic_settings import BaseSettings
 class MemoFluxSettings(BaseSettings):
     """MemoFlux 运行配置。"""
 
-    database_url: str | None = Field(default=None, alias="MEMOFLUX_DATABASE_URL")
+    database_url: str | None = Field(
+        default="postgresql+asyncpg://tradeuser:tradepassword@memo-postgres:5432/memory",
+        alias="MEMOFLUX_DATABASE_URL",
+    )
     database_schema: str = Field(default="memoflux", alias="MEMOFLUX_DATABASE_SCHEMA")
     llm_base_url: str | None = Field(default=None, alias="MEMOFLUX_LLM_BASE_URL")
     llm_api_key: str | None = Field(default=None, alias="MEMOFLUX_LLM_API_KEY")
@@ -20,10 +23,8 @@ class MemoFluxSettings(BaseSettings):
     embedding_api_key: str | None = Field(default=None, alias="MEMOFLUX_EMBEDDING_API_KEY")
     embedding_base_url: str | None = Field(default=None, alias="MEMOFLUX_EMBEDDING_BASE_URL")
     embedding_timeout_seconds: float = Field(default=30.0, alias="MEMOFLUX_EMBEDDING_TIMEOUT_SECONDS")
-    embedding_prewarm_on_startup: bool = Field(default=True, alias="MEMOFLUX_EMBEDDING_PREWARM_ON_STARTUP")
-    embedding_cache_dir: str | None = Field(default=None, alias="MEMOFLUX_EMBEDDING_CACHE_DIR")
-    embedding_local_files_only: bool = Field(default=False, alias="MEMOFLUX_EMBEDDING_LOCAL_FILES_ONLY")
-    hf_endpoint: str = Field(default="https://hf-mirror.com", alias="MEMOFLUX_HF_ENDPOINT")
+    embedding_cache_dir: str | None = Field(default="/home/memo/.memoflux/data/models", alias="MEMOFLUX_EMBEDDING_CACHE_DIR")
+    embedding_use_local_weights: bool = Field(default=True, alias="MEMOFLUX_EMBEDDING_USE_LOCAL_WEIGHTS")
     memory_cleanup_enabled: bool = Field(default=True, alias="MEMOFLUX_MEMORY_CLEANUP_ENABLED")
     memory_retention_days: int = Field(default=180, alias="MEMOFLUX_MEMORY_RETENTION_DAYS")
     memory_cleanup_hour: int = Field(default=4, alias="MEMOFLUX_MEMORY_CLEANUP_HOUR")

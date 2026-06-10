@@ -67,11 +67,10 @@ Create `.env` from `.env.example` and adjust the values for your deployment.
 Core settings:
 
 ```bash
-MEMOFLUX_DATABASE_URL=postgresql+psycopg2://tradeuser:tradepassword@memo-postgres:5432/memory
-MEMOFLUX_DATABASE_SCHEMA=memoflux
 MEMOFLUX_SERVICE_PORT=8020
-MEMOFLUX_APP_RELOAD=true
 ```
+
+The default database URL is `postgresql+asyncpg://tradeuser:tradepassword@memo-postgres:5432/memory`, so `.env` usually does not need to set it.
 
 LLM settings:
 
@@ -87,9 +86,9 @@ Local embedding settings:
 MEMOFLUX_EMBEDDING_PROVIDER=local
 MEMOFLUX_EMBEDDING_MODEL=BAAI/bge-base-zh-v1.5
 MEMOFLUX_EMBEDDING_DIM=768
-MEMOFLUX_EMBEDDING_CACHE_DIR=/home/memo/.memoflux/data/models
-MEMOFLUX_EMBEDDING_PREWARM_ON_STARTUP=true
 ```
+
+The official image downloads the default embedding model into `/home/memo/.memoflux/data/models` during image build. Runtime loads local weights only by default and does not download from the network.
 
 OpenAI-compatible embedding settings:
 
@@ -119,10 +118,9 @@ The standalone compose file exposes:
 - MemoFlux API on `http://127.0.0.1:8020`
 - PostgreSQL on host port `5433`
 
-If you use the provided standalone compose file without editing it, make sure `.env` matches the standalone database service name, database, and credentials:
+If you use the provided standalone compose file without editing it, only adjust the container port in `.env` when needed:
 
 ```bash
-MEMOFLUX_DATABASE_URL=postgresql+psycopg2://memouser:memopassword@memo-postgres:5432/memo
 MEMOFLUX_SERVICE_PORT=8010
 ```
 
