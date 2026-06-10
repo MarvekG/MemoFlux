@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from contextlib import asynccontextmanager
 from datetime import datetime
 from pathlib import Path
@@ -17,6 +18,8 @@ from memoflux.models import DeleteAuditRecord, MemoryRecord, QueryAuditRecord, R
 from memoflux.retention import start_memory_retention_cleanup
 from memoflux.service import MemoFluxService
 from memoflux.storage.postgres import PostgresMemoryRepository
+
+logger = logging.getLogger(__name__)
 
 
 class IngestRequest(BaseModel):
@@ -141,6 +144,17 @@ def create_app(*, repository=None, llm_client=None, embedding_client=None, datab
             output_tokens=result.output_tokens,
             cached_tokens=result.cached_tokens,
             reasoning_tokens=result.reasoning_tokens,
+        )
+        logger.info(
+            "MemoFlux prompt eval completed",
+            extra={
+                "prompt_key": request.prompt_key,
+                "model": result.model,
+                "input_tokens": result.input_tokens,
+                "output_tokens": result.output_tokens,
+                "cached_tokens": result.cached_tokens,
+                "reasoning_tokens": result.reasoning_tokens,
+            },
         )
         return _ok({"status": "ok", "prompt_key": request.prompt_key, "model": result.model, "latency_ms": 0, "output": result.output, "error_code": None, "error_message": None})
 

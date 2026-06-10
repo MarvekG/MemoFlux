@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import logging
 from datetime import UTC, datetime, timedelta
+from time import perf_counter
 from typing import Any
 from uuid import uuid4
 
@@ -10,6 +12,7 @@ from memoflux.models import DeleteAuditRecord, DeleteResult, QueryAuditRecord, R
 from memoflux.services.embedding_service import embedding_service
 
 NO_ANSWER_KEY = "answers.no_memory"
+logger = logging.getLogger(__name__)
 
 
 class MemoFluxService:
@@ -37,12 +40,22 @@ class MemoFluxService:
             cached_tokens=embedding.cached_tokens,
             reasoning_tokens=embedding.reasoning_tokens,
         )
-        return self.repository.insert_memory(
+        memory = self.repository.insert_memory(
             session=session,
             content=content,
             occurred_at=occurred_at,
             embedding=embedding.output.get("embedding"),
         )
+        logger.info(
+            "MemoFlux ingest completed",
+            extra={
+                "memo_session": session,
+                "memory_id": memory.memory_id,
+                "content_length": len(content),
+                "embedding_recorded": bool(embedding.output.get("embedding")),
+            },
+        )
+        return memory
 
     def recall(self, *, session: str, query: str, top_k: int = 12, lang: str | None = None) -> RecallResult:
         """召回同一 session 内的候选记忆并生成答案。"""
@@ -52,15 +65,96 @@ class MemoFluxService:
         if not query:
             raise ValueError("query is required")
         query_id = uuid4().hex
+        recall_started = perf_counter()
+        logger.info(
+            "MemoFlux recall started",
+            extra={
+                "memo_session": session,
+                "query_id": query_id,
+                "query_length": len(query),
+                "top_k": top_k,
+            },
+        )
+        logger.info(
+            "MemoFlux recall stage started",
+            extra={
+                "memo_session": session,
+                "query_id": query_id,
+                "stage": "query_planner",
+            },
+        )
+        stage_started = perf_counter()
         plan = self.llm_client.plan_query(query=query)
+        planner_elapsed_ms = _elapsed_ms(stage_started)
         rewritten_queries = plan.output.get("rewritten_queries") or [query]
         retrieval_queries = _build_retrieval_queries(query, rewritten_queries)
+        retrieval_query_lengths = _text_lengths_summary(retrieval_queries)
         candidate_limit = _candidate_pool_limit(top_k)
+        logger.info(
+            "MemoFlux recall stage completed",
+            extra={
+                "memo_session": session,
+                "query_id": query_id,
+                "stage": "query_planner",
+                "elapsed_ms": planner_elapsed_ms,
+                "rewritten_query_count": len(rewritten_queries),
+                "retrieval_query_count": len(retrieval_queries),
+                "retrieval_query_length_min": retrieval_query_lengths["min"],
+                "retrieval_query_length_max": retrieval_query_lengths["max"],
+                "retrieval_query_length_avg": retrieval_query_lengths["avg"],
+                "candidate_limit": candidate_limit,
+                "input_tokens": plan.input_tokens,
+                "output_tokens": plan.output_tokens,
+                "cached_tokens": plan.cached_tokens,
+                "reasoning_tokens": plan.reasoning_tokens,
+            },
+        )
         memory_batches = []
+        embedding_metadata = _embedding_metadata(self.embedding_service)
+        logger.info(
+            "MemoFlux recall stage started",
+            extra={
+                "memo_session": session,
+                "query_id": query_id,
+                "stage": "embedding",
+                "provider": embedding_metadata["provider"],
+                "model": embedding_metadata["model"],
+                "retrieval_query_count": len(retrieval_queries),
+                "retrieval_query_length_min": retrieval_query_lengths["min"],
+                "retrieval_query_length_max": retrieval_query_lengths["max"],
+                "retrieval_query_length_avg": retrieval_query_lengths["avg"],
+            },
+        )
+        stage_started = perf_counter()
         query_embeddings = self.embedding_service.embed_texts(retrieval_queries)
+        embedding_elapsed_ms = _elapsed_ms(stage_started)
+        logger.info(
+            "MemoFlux recall stage completed",
+            extra={
+                "memo_session": session,
+                "query_id": query_id,
+                "stage": "embedding",
+                "elapsed_ms": embedding_elapsed_ms,
+                "retrieval_query_count": len(retrieval_queries),
+                "embedding_count": len(query_embeddings),
+            },
+        )
         if len(query_embeddings) != len(retrieval_queries):
             raise ValueError("recall embedding count does not match retrieval query count")
-        for embedding in query_embeddings:
+        logger.info(
+            "MemoFlux recall stage started",
+            extra={
+                "memo_session": session,
+                "query_id": query_id,
+                "stage": "vector_search",
+                "embedding_count": len(query_embeddings),
+                "candidate_limit": candidate_limit,
+            },
+        )
+        stage_started = perf_counter()
+        vector_batch_sizes: list[int] = []
+        vector_batch_elapsed_ms: list[float] = []
+        for index, embedding in enumerate(query_embeddings):
             query_embedding = LLMResult(output={"embedding": embedding})
             self.repository.record_usage(
                 operation="embedding:recall",
@@ -69,17 +163,92 @@ class MemoFluxService:
                 cached_tokens=query_embedding.cached_tokens,
                 reasoning_tokens=query_embedding.reasoning_tokens,
             )
-            memory_batches.append(
-                self.repository.search_memories(
-                    session=session,
-                    terms=set(),
-                    limit=candidate_limit,
-                    query_embedding=query_embedding.output.get("embedding"),
-                )
+            batch_started = perf_counter()
+            vector_batch = self.repository.search_memories(
+                session=session,
+                terms=set(),
+                limit=candidate_limit,
+                query_embedding=query_embedding.output.get("embedding"),
             )
-        listed_memories, _ = self.repository.list_memories(session=session, limit=candidate_limit)
+            vector_batch_elapsed_ms.append(_elapsed_ms(batch_started))
+            vector_batch_sizes.append(len(vector_batch))
+            memory_batches.append(vector_batch)
+            logger.info(
+                "MemoFlux recall vector search batch completed",
+                extra={
+                    "memo_session": session,
+                    "query_id": query_id,
+                    "stage": "vector_search",
+                    "batch_index": index,
+                    "elapsed_ms": vector_batch_elapsed_ms[-1],
+                    "candidate_count": len(vector_batch),
+                    "candidate_limit": candidate_limit,
+                },
+            )
+        vector_search_elapsed_ms = _elapsed_ms(stage_started)
+        logger.info(
+            "MemoFlux recall stage completed",
+            extra={
+                "memo_session": session,
+                "query_id": query_id,
+                "stage": "vector_search",
+                "elapsed_ms": vector_search_elapsed_ms,
+                "batch_count": len(vector_batch_sizes),
+                "batch_sizes": vector_batch_sizes,
+                "batch_elapsed_ms": vector_batch_elapsed_ms,
+                "candidate_limit": candidate_limit,
+            },
+        )
+        logger.info(
+            "MemoFlux recall stage started",
+            extra={
+                "memo_session": session,
+                "query_id": query_id,
+                "stage": "list_fallback",
+                "candidate_limit": candidate_limit,
+            },
+        )
+        stage_started = perf_counter()
+        listed_memories, listed_total = self.repository.list_memories(session=session, limit=candidate_limit)
+        list_elapsed_ms = _elapsed_ms(stage_started)
+        logger.info(
+            "MemoFlux recall stage completed",
+            extra={
+                "memo_session": session,
+                "query_id": query_id,
+                "stage": "list_fallback",
+                "elapsed_ms": list_elapsed_ms,
+                "listed_count": len(listed_memories),
+                "listed_total": listed_total,
+                "candidate_limit": candidate_limit,
+            },
+        )
         memory_batches.append(listed_memories)
+        logger.info(
+            "MemoFlux recall stage started",
+            extra={
+                "memo_session": session,
+                "query_id": query_id,
+                "stage": "merge_candidates",
+                "batch_count": len(memory_batches),
+                "candidate_limit": candidate_limit,
+            },
+        )
+        stage_started = perf_counter()
         memories = _merge_memories_by_id(memory_batches, limit=candidate_limit)
+        merge_elapsed_ms = _elapsed_ms(stage_started)
+        logger.info(
+            "MemoFlux recall stage completed",
+            extra={
+                "memo_session": session,
+                "query_id": query_id,
+                "stage": "merge_candidates",
+                "elapsed_ms": merge_elapsed_ms,
+                "batch_count": len(memory_batches),
+                "candidate_count": len(memories),
+                "candidate_limit": candidate_limit,
+            },
+        )
         self.repository.record_usage(
             operation="query_planner",
             input_tokens=plan.input_tokens,
@@ -89,6 +258,17 @@ class MemoFluxService:
         )
         if not memories:
             result = RecallResult(query_id=query_id, answer=i18n_service.t(NO_ANSWER_KEY, lang=lang), references=[])
+            logger.info(
+                "MemoFlux recall stage started",
+                extra={
+                    "memo_session": session,
+                    "query_id": query_id,
+                    "stage": "audit_write",
+                    "candidate_count": 0,
+                    "selected_count": 0,
+                },
+            )
+            stage_started = perf_counter()
             self.repository.record_query_audit(
                 QueryAuditRecord(
                     query_id=query_id,
@@ -106,8 +286,80 @@ class MemoFluxService:
                     created_at=_now_utc(),
                 )
             )
+            audit_elapsed_ms = _elapsed_ms(stage_started)
+            final_stage_elapsed = {
+                "query_planner": planner_elapsed_ms,
+                "embedding": embedding_elapsed_ms,
+                "vector_search": vector_search_elapsed_ms,
+                "list_fallback": list_elapsed_ms,
+                "merge_candidates": merge_elapsed_ms,
+                "answer_synthesizer": 0.0,
+                "audit_write": audit_elapsed_ms,
+            }
+            dominant_stage, dominant_elapsed_ms = _dominant_stage(final_stage_elapsed)
+            logger.info(
+                "MemoFlux recall stage completed",
+                extra={
+                    "memo_session": session,
+                    "query_id": query_id,
+                    "stage": "audit_write",
+                    "elapsed_ms": audit_elapsed_ms,
+                    "candidate_count": 0,
+                    "selected_count": 0,
+                },
+            )
+            logger.info(
+                "MemoFlux recall completed",
+                extra={
+                    "memo_session": session,
+                    "query_id": query_id,
+                    "candidate_count": 0,
+                    "selected_count": 0,
+                    "reference_count": 0,
+                    "rewritten_query_count": len(rewritten_queries),
+                    "retrieval_query_count": len(retrieval_queries),
+                    "answerability": "no_memory",
+                    "total_elapsed_ms": _elapsed_ms(recall_started),
+                    "planner_elapsed_ms": planner_elapsed_ms,
+                    "embedding_elapsed_ms": embedding_elapsed_ms,
+                    "vector_search_elapsed_ms": vector_search_elapsed_ms,
+                    "list_elapsed_ms": list_elapsed_ms,
+                    "merge_elapsed_ms": merge_elapsed_ms,
+                    "synthesis_elapsed_ms": 0.0,
+                    "audit_elapsed_ms": audit_elapsed_ms,
+                    "dominant_stage": dominant_stage,
+                    "dominant_elapsed_ms": dominant_elapsed_ms,
+                },
+            )
             return result
+        logger.info(
+            "MemoFlux recall stage started",
+            extra={
+                "memo_session": session,
+                "query_id": query_id,
+                "stage": "answer_synthesizer",
+                "candidate_count": len(memories),
+                "synthesis_memory_count": min(len(memories), top_k),
+            },
+        )
+        stage_started = perf_counter()
         synthesis = self.llm_client.synthesize_answer(query=query, memories=memories[:top_k])
+        synthesis_elapsed_ms = _elapsed_ms(stage_started)
+        logger.info(
+            "MemoFlux recall stage completed",
+            extra={
+                "memo_session": session,
+                "query_id": query_id,
+                "stage": "answer_synthesizer",
+                "elapsed_ms": synthesis_elapsed_ms,
+                "candidate_count": len(memories),
+                "synthesis_memory_count": min(len(memories), top_k),
+                "input_tokens": synthesis.input_tokens,
+                "output_tokens": synthesis.output_tokens,
+                "cached_tokens": synthesis.cached_tokens,
+                "reasoning_tokens": synthesis.reasoning_tokens,
+            },
+        )
         self.repository.record_usage(
             operation="answer_synthesizer",
             input_tokens=synthesis.input_tokens,
@@ -115,6 +367,16 @@ class MemoFluxService:
             cached_tokens=synthesis.cached_tokens,
             reasoning_tokens=synthesis.reasoning_tokens,
         )
+        logger.info(
+            "MemoFlux recall stage started",
+            extra={
+                "memo_session": session,
+                "query_id": query_id,
+                "stage": "postprocess",
+                "candidate_count": len(memories),
+            },
+        )
+        stage_started = perf_counter()
         selection_reasons = _filter_selection_reasons(memories, synthesis.output.get("relevance_by_id") or {})
         used_memories = _filter_used_memories(memories, list(synthesis.output.get("used_memory_ids") or []))
         used_memory_ids = {memory.memory_id for memory in used_memories}
@@ -144,6 +406,31 @@ class MemoFluxService:
             confidence=_coerce_confidence(synthesis.output.get("confidence")),
             uncertainties=[str(item) for item in synthesis.output.get("uncertainties") or []],
         )
+        postprocess_elapsed_ms = _elapsed_ms(stage_started)
+        logger.info(
+            "MemoFlux recall stage completed",
+            extra={
+                "memo_session": session,
+                "query_id": query_id,
+                "stage": "postprocess",
+                "elapsed_ms": postprocess_elapsed_ms,
+                "candidate_count": len(memories),
+                "used_memory_count": len(used_memories),
+                "reference_count": len(references),
+                "uncertainty_count": len(result.uncertainties),
+            },
+        )
+        logger.info(
+            "MemoFlux recall stage started",
+            extra={
+                "memo_session": session,
+                "query_id": query_id,
+                "stage": "audit_write",
+                "candidate_count": len(memories),
+                "selected_count": len(used_memories),
+            },
+        )
+        stage_started = perf_counter()
         self.repository.record_query_audit(
             QueryAuditRecord(
                 query_id=query_id,
@@ -160,6 +447,54 @@ class MemoFluxService:
                 error_message=None,
                 created_at=_now_utc(),
             )
+        )
+        audit_elapsed_ms = _elapsed_ms(stage_started)
+        final_stage_elapsed = {
+            "query_planner": planner_elapsed_ms,
+            "embedding": embedding_elapsed_ms,
+            "vector_search": vector_search_elapsed_ms,
+            "list_fallback": list_elapsed_ms,
+            "merge_candidates": merge_elapsed_ms,
+            "answer_synthesizer": synthesis_elapsed_ms,
+            "postprocess": postprocess_elapsed_ms,
+            "audit_write": audit_elapsed_ms,
+        }
+        dominant_stage, dominant_elapsed_ms = _dominant_stage(final_stage_elapsed)
+        logger.info(
+            "MemoFlux recall stage completed",
+            extra={
+                "memo_session": session,
+                "query_id": query_id,
+                "stage": "audit_write",
+                "elapsed_ms": audit_elapsed_ms,
+                "candidate_count": len(memories),
+                "selected_count": len(used_memories),
+            },
+        )
+        logger.info(
+            "MemoFlux recall completed",
+            extra={
+                "memo_session": session,
+                "query_id": query_id,
+                "candidate_count": len(memories),
+                "selected_count": len(used_memories),
+                "reference_count": len(references),
+                "rewritten_query_count": len(rewritten_queries),
+                "retrieval_query_count": len(retrieval_queries),
+                "answerability": selected_reasons.get("__answerability"),
+                "confidence": result.confidence,
+                "total_elapsed_ms": _elapsed_ms(recall_started),
+                "planner_elapsed_ms": planner_elapsed_ms,
+                "embedding_elapsed_ms": embedding_elapsed_ms,
+                "vector_search_elapsed_ms": vector_search_elapsed_ms,
+                "list_elapsed_ms": list_elapsed_ms,
+                "merge_elapsed_ms": merge_elapsed_ms,
+                "synthesis_elapsed_ms": synthesis_elapsed_ms,
+                "postprocess_elapsed_ms": postprocess_elapsed_ms,
+                "audit_elapsed_ms": audit_elapsed_ms,
+                "dominant_stage": dominant_stage,
+                "dominant_elapsed_ms": dominant_elapsed_ms,
+            },
         )
         return result
 
@@ -208,6 +543,17 @@ class MemoFluxService:
                     created_at=_now_utc(),
                 )
             )
+            logger.info(
+                "MemoFlux delete completed",
+                extra={
+                    "memo_session": session,
+                    "delete_id": delete_id,
+                    "mode": "query_dry_run",
+                    "dry_run": True,
+                    "matched_count": len(matched),
+                    "affected_count": 0,
+                },
+            )
             return DeleteResult(delete_id=delete_id, matched_memory_ids=matched, affected_memory_ids=[], status="ok")
         matched = self.repository.delete_memories(session=session, memory_ids=memory_ids or [])
         self.repository.scrub_deleted_memory_from_audits(session=session, memory_ids=matched)
@@ -225,6 +571,18 @@ class MemoFluxService:
                 created_at=_now_utc(),
             )
         )
+        logger.info(
+            "MemoFlux delete completed",
+            extra={
+                "memo_session": session,
+                "delete_id": delete_id,
+                "mode": "memory_ids",
+                "dry_run": dry_run,
+                "target_count": len(memory_ids or []),
+                "matched_count": len(matched),
+                "affected_count": len(matched),
+            },
+        )
         return DeleteResult(delete_id=delete_id, matched_memory_ids=matched, affected_memory_ids=matched, status="ok")
 
     def preview(self, *, session: str | None = None, limit: int = 50, offset: int = 0):
@@ -235,12 +593,26 @@ class MemoFluxService:
     def usage_stats(self):
         """返回聚合用量统计。"""
 
-        return self.repository.usage_stats()
+        stats = self.repository.usage_stats()
+        logger.info(
+            "MemoFlux usage stats returned",
+            extra={
+                "total_calls": stats.total_calls,
+                "input_tokens": stats.input_tokens,
+                "output_tokens": stats.output_tokens,
+                "cached_tokens": stats.cached_tokens,
+                "cache_hit_rate": stats.cache_hit_rate,
+                "operation_count": len(stats.by_operation),
+            },
+        )
+        return stats
 
     def clear_usage_stats(self) -> int:
         """清空聚合用量统计。"""
 
-        return self.repository.clear_usage_stats()
+        deleted = self.repository.clear_usage_stats()
+        logger.info("MemoFlux usage stats cleared", extra={"deleted_count": deleted})
+        return deleted
 
     def cleanup_expired_memories(self, *, retention_days: int | None = None) -> dict[str, Any]:
         """按发生时间清理超过保留期的记忆。
@@ -303,6 +675,71 @@ def _filter_used_memories(memories, used_memory_ids: list[str]) -> list:
         return []
     by_id = {memory.memory_id: memory for memory in memories}
     return [by_id[memory_id] for memory_id in used_memory_ids if memory_id in by_id]
+
+
+def _elapsed_ms(started: float) -> float:
+    """计算从指定时间点到当前的毫秒耗时。
+
+    Args:
+        started: `perf_counter()` 返回的起始时间。
+
+    Returns:
+        保留两位小数的耗时毫秒数。
+    """
+
+    return round((perf_counter() - started) * 1000, 2)
+
+
+def _text_lengths_summary(texts: list[str]) -> dict[str, float | int]:
+    """统计文本长度分布，避免在日志中输出原文。
+
+    Args:
+        texts: 待统计的文本列表。
+
+    Returns:
+        文本长度的最小值、最大值和平均值摘要。
+    """
+
+    lengths = [len(text) for text in texts]
+    if not lengths:
+        return {"min": 0, "max": 0, "avg": 0.0}
+    return {
+        "min": min(lengths),
+        "max": max(lengths),
+        "avg": round(sum(lengths) / len(lengths), 2),
+    }
+
+
+def _embedding_metadata(embedding_client) -> dict[str, str]:
+    """提取向量客户端元信息，兼容测试 fake 和外部实现。
+
+    Args:
+        embedding_client: 提供 `embed_texts` 能力的向量客户端实例。
+
+    Returns:
+        可安全写入日志的 provider/model 摘要。
+    """
+
+    return {
+        "provider": str(getattr(embedding_client, "provider", "unknown")),
+        "model": str(getattr(embedding_client, "model", "unknown")),
+    }
+
+
+def _dominant_stage(stage_elapsed_ms: dict[str, float]) -> tuple[str, float]:
+    """从阶段耗时中找出最慢阶段。
+
+    Args:
+        stage_elapsed_ms: 阶段名称到耗时毫秒数的映射。
+
+    Returns:
+        最慢阶段名称和耗时毫秒数。
+    """
+
+    if not stage_elapsed_ms:
+        return "unknown", 0.0
+    stage, elapsed_ms = max(stage_elapsed_ms.items(), key=lambda item: item[1])
+    return stage, elapsed_ms
 
 
 def _filter_selection_reasons(memories, relevance_by_id: dict) -> dict[str, str]:
