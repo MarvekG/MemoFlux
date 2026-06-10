@@ -71,7 +71,7 @@ MemoFlux 提供一组简单的 HTTP 接口，用于长期记忆工作流：
 核心配置：
 
 ```bash
-MEMOFLUX_DATABASE_URL=postgresql+psycopg2://tradeuser:tradepassword@memo-postgres:5432/memory
+MEMOFLUX_DATABASE_URL=postgresql+asyncpg://tradeuser:tradepassword@memo-postgres:5432/memory
 MEMOFLUX_DATABASE_SCHEMA=memoflux
 MEMOFLUX_SERVICE_PORT=8020
 MEMOFLUX_APP_RELOAD=true
@@ -126,7 +126,7 @@ docker compose up -d
 如果直接使用当前 `memo/docker-compose.yml`，需要让 `.env` 匹配独立 Docker Compose 中的数据库和容器端口：
 
 ```bash
-MEMOFLUX_DATABASE_URL=postgresql+psycopg2://memouser:memopassword@memo-postgres:5432/memo
+MEMOFLUX_DATABASE_URL=postgresql+asyncpg://memouser:memopassword@memo-postgres:5432/memo
 MEMOFLUX_SERVICE_PORT=8010
 ```
 

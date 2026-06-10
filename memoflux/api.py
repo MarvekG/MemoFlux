@@ -69,6 +69,9 @@ def create_app(*, repository=None, llm_client=None, embedding_client=None, datab
     async def lifespan(app: FastAPI):
         prewarm_task = None
         cleanup_task = None
+        init_schema = getattr(service.repository, "init_schema", None)
+        if init_schema is not None:
+            await init_schema()
         if settings.embedding_prewarm_on_startup:
             prewarm_task = asyncio.create_task(asyncio.to_thread(service.embedding_service.prewarm_local_model))
         if settings.memory_cleanup_enabled:
@@ -86,20 +89,26 @@ def create_app(*, repository=None, llm_client=None, embedding_client=None, datab
     app.state.service = service
 
     @app.exception_handler(HTTPException)
-    def http_exception_handler(request: Request, exc: HTTPException):
+    async def http_exception_handler(request: Request, exc: HTTPException):
+        """按请求语言返回统一 HTTP 错误响应。"""
+
         lang = _request_language(request)
         if isinstance(exc.detail, dict) and "error" in exc.detail:
             return JSONResponse(status_code=exc.status_code, content=exc.detail)
         return JSONResponse(status_code=exc.status_code, content=_error("http_error", lang=lang, details={"reason": str(exc.detail)}))
 
     @app.post("/v1/ingest")
-    def ingest(request: IngestRequest):
-        memory = service.ingest(session=request.session, content=request.content, occurred_at=request.occurred_at)
+    async def ingest(request: IngestRequest):
+        """异步写入一条记忆。"""
+
+        memory = await service.ingest(session=request.session, content=request.content, occurred_at=request.occurred_at)
         return _ok(_memory_payload(memory, include_content=False))
 
     @app.post("/v1/recall")
-    def recall(request: RecallRequest, accept_language: str | None = Header(default=None)):
-        result = service.recall(
+    async def recall(request: RecallRequest, accept_language: str | None = Header(default=None)):
+        """异步召回记忆并生成答案。"""
+
+        result = await service.recall(
             session=request.session,
             query=request.query,
             top_k=request.top_k,
@@ -115,10 +124,12 @@ def create_app(*, repository=None, llm_client=None, embedding_client=None, datab
         return _ok(payload)
 
     @app.post("/v1/delete")
-    def delete(request: DeleteRequest, accept_language: str | None = Header(default=None)):
+    async def delete(request: DeleteRequest, accept_language: str | None = Header(default=None)):
+        """异步删除记忆或执行删除 dry-run。"""
+
         lang = normalize_language(accept_language)
         try:
-            result = service.delete(
+            result = await service.delete(
                 session=request.session,
                 memory_ids=request.memory_ids,
                 query=request.query,
@@ -132,13 +143,17 @@ def create_app(*, repository=None, llm_client=None, embedding_client=None, datab
         return _ok(result.__dict__)
 
     @app.get("/v1/i18n/{lang}")
-    def i18n(lang: str):
+    async def i18n(lang: str):
+        """返回指定语言的本地化文案。"""
+
         return _ok(i18n_service.get_locale(lang))
 
     @app.post("/v1/prompt-eval")
-    def prompt_eval(request: PromptEvalRequest):
-        result = service.llm_client.run_prompt(prompt_key=request.prompt_key, payload=request.payload)
-        service.repository.record_usage(
+    async def prompt_eval(request: PromptEvalRequest):
+        """异步执行 prompt 调试并记录聚合用量。"""
+
+        result = await service.llm_client.run_prompt(prompt_key=request.prompt_key, payload=request.payload)
+        await service.repository.record_usage(
             operation=f"prompt_eval:{request.prompt_key}",
             input_tokens=result.input_tokens,
             output_tokens=result.output_tokens,
@@ -159,12 +174,16 @@ def create_app(*, repository=None, llm_client=None, embedding_client=None, datab
         return _ok({"status": "ok", "prompt_key": request.prompt_key, "model": result.model, "latency_ms": 0, "output": result.output, "error_code": None, "error_message": None})
 
     @app.get("/v1/health")
-    def health():
+    async def health():
+        """返回 MemoFlux 服务健康状态。"""
+
         return _ok({"status": "ok", "db": "ok", "retrieval": "ok", "llm": "local", "retrieval_strategy": "text_time"})
 
     @app.get("/v1/preview")
-    def preview(session: str | None = None, limit: int = 50, offset: int = 0):
-        items, total = service.preview(session=session, limit=limit, offset=offset)
+    async def preview(session: str | None = None, limit: int = 50, offset: int = 0):
+        """异步预览原始记忆。"""
+
+        items, total = await service.preview(session=session, limit=limit, offset=offset)
         return _ok(
             {
                 "items": [_memory_payload(item, include_content=True) for item in items],
@@ -176,8 +195,15 @@ def create_app(*, repository=None, llm_client=None, embedding_client=None, datab
         )
 
     @app.get("/v1/audits")
-    def audits(session: str | None = None, query_id: str | None = None, limit: int = 50, offset: int = 0):
-        items, total = service.repository.list_audits(session=session, query_id=query_id, limit=limit, offset=offset)
+    async def audits(session: str | None = None, query_id: str | None = None, limit: int = 50, offset: int = 0):
+        """异步列出查询和删除审计记录。"""
+
+        items, total = await service.repository.list_audits(
+            session=session,
+            query_id=query_id,
+            limit=limit,
+            offset=offset,
+        )
         return _ok(
             {
                 "items": [_audit_payload(item) for item in items],
@@ -189,13 +215,17 @@ def create_app(*, repository=None, llm_client=None, embedding_client=None, datab
         )
 
     @app.get("/v1/usage/stats")
-    def usage_stats():
-        stats = service.usage_stats()
+    async def usage_stats():
+        """异步返回聚合用量统计。"""
+
+        stats = await service.usage_stats()
         return _ok({"status": "ok", **stats.__dict__})
 
     @app.delete("/v1/usage/stats")
-    def clear_usage_stats():
-        return _ok({"status": "ok", "deleted": service.clear_usage_stats()})
+    async def clear_usage_stats():
+        """异步清空聚合用量统计。"""
+
+        return _ok({"status": "ok", "deleted": await service.clear_usage_stats()})
 
     return app
 

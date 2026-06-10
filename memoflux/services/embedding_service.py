@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 from threading import Lock
@@ -47,8 +48,8 @@ class EmbeddingService:
 
         return self._model
 
-    def embed_text(self, text: str) -> list[float]:
-        """生成单条文本的向量。
+    async def embed_text(self, text: str) -> list[float]:
+        """异步生成单条文本的向量。
 
         Args:
             text: 待向量化的文本。
@@ -57,11 +58,11 @@ class EmbeddingService:
             归一化后的浮点向量。
         """
 
-        vectors = self.embed_texts([text])
+        vectors = await self.embed_texts([text])
         return vectors[0] if vectors else []
 
-    def embed_texts(self, texts: list[str]) -> list[list[float]]:
-        """使用配置的提供方批量生成文本向量。
+    async def embed_texts(self, texts: list[str]) -> list[list[float]]:
+        """异步使用配置的提供方批量生成文本向量。
 
         Args:
             texts: 待向量化的文本列表。
@@ -77,9 +78,9 @@ class EmbeddingService:
         if not normalized:
             return []
         if self._provider == "local":
-            return self._embed_local_texts(normalized)
+            return await asyncio.to_thread(self._embed_local_texts, normalized)
         if self._provider == "openai_compatible":
-            return self._embed_openai_compatible_texts(normalized)
+            return await self._embed_openai_compatible_texts(normalized)
         raise ValueError(f"Unsupported MEMOFLUX_EMBEDDING_PROVIDER: {self._provider}")
 
     def _embed_local_texts(self, texts: list[str]) -> list[list[float]]:
@@ -155,16 +156,28 @@ class EmbeddingService:
                 extra={"embedding_model": self._model},
             )
 
-    def _embed_openai_compatible_texts(self, texts: list[str]) -> list[list[float]]:
+    async def _embed_openai_compatible_texts(self, texts: list[str]) -> list[list[float]]:
+        """调用 OpenAI 兼容接口异步生成向量。
+
+        Args:
+            texts: 待向量化的文本列表。
+
+        Returns:
+            与输入顺序一致的向量列表。
+
+        Raises:
+            ValueError: 缺少 API key 或返回维度不符合配置。
+        """
+
         if not self._api_key:
             raise ValueError("MEMOFLUX_EMBEDDING_API_KEY is required for openai_compatible embedding provider")
-        from openai import OpenAI
+        from openai import AsyncOpenAI
 
         kwargs: dict[str, Any] = {"api_key": self._api_key, "timeout": self._timeout_seconds}
         if self._base_url:
             kwargs["base_url"] = self._base_url
-        client = OpenAI(**kwargs)
-        response = client.embeddings.create(model=self._model, input=texts, timeout=self._timeout_seconds)
+        client = AsyncOpenAI(**kwargs)
+        response = await client.embeddings.create(model=self._model, input=texts, timeout=self._timeout_seconds)
         ordered = sorted(response.data, key=lambda item: int(item.index))
         vectors = [[float(value) for value in item.embedding] for item in ordered]
         for vector in vectors:

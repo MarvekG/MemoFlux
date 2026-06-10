@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import urllib.request
 from dataclasses import dataclass
@@ -25,14 +26,29 @@ class LLMResult:
 class LocalLLMClient:
     """无外部 LLM 配置时使用的本地占位 LLM。"""
 
-    def plan_query(self, *, query: str) -> LLMResult:
-        """生成本地 query plan。"""
+    async def plan_query(self, *, query: str) -> LLMResult:
+        """异步生成本地 query plan。
+
+        Args:
+            query: 原始查询文本。
+
+        Returns:
+            包含检索改写 query 的 LLM 结果。
+        """
 
         output = QueryPlanOutput(rewritten_queries=[query])
         return LLMResult(output=output.model_dump(), input_tokens=_estimate_tokens(query), output_tokens=4, model="local")
 
-    def synthesize_answer(self, *, query: str, memories: list) -> LLMResult:
-        """基于候选记忆生成本地答案。"""
+    async def synthesize_answer(self, *, query: str, memories: list) -> LLMResult:
+        """异步基于候选记忆生成本地答案。
+
+        Args:
+            query: 原始查询文本。
+            memories: 候选记忆列表。
+
+        Returns:
+            本地整合后的答案结果。
+        """
 
         answer = "\n".join(memory.content for memory in memories)
         output = AnswerSynthesisOutput(
@@ -44,8 +60,16 @@ class LocalLLMClient:
         )
         return LLMResult(output=output.model_dump(), input_tokens=_estimate_tokens(query), output_tokens=_estimate_tokens(answer), model="local")
 
-    def run_prompt(self, *, prompt_key: str, payload: dict) -> LLMResult:
-        """返回本地 prompt 调试结果。"""
+    async def run_prompt(self, *, prompt_key: str, payload: dict) -> LLMResult:
+        """异步返回本地 prompt 调试结果。
+
+        Args:
+            prompt_key: 待调试的 prompt 标识。
+            payload: prompt 输入负载。
+
+        Returns:
+            本地 prompt 调试结果。
+        """
 
         return LLMResult(output={"prompt_key": prompt_key, "payload": payload}, input_tokens=1, output_tokens=1, model="local")
 
@@ -59,8 +83,15 @@ class OpenAICompatibleLLMClient:
     model: str
     timeout_seconds: int = 60
 
-    def plan_query(self, *, query: str) -> LLMResult:
-        """调用真实 LLM 生成 query plan。"""
+    async def plan_query(self, *, query: str) -> LLMResult:
+        """异步调用真实 LLM 生成 query plan。
+
+        Args:
+            query: 原始查询文本。
+
+        Returns:
+            包含检索改写 query 的 LLM 结果。
+        """
 
         prompt_input = QueryPlanInput(query=query)
         messages = [
@@ -74,7 +105,7 @@ class OpenAICompatibleLLMClient:
             },
             {"role": "user", "content": prompt_input.model_dump_json()},
         ]
-        result = self._chat(messages)
+        result = await self._chat(messages)
         raw_output = _parse_json_object(result.output.get("content", ""), fallback={"rewritten_queries": [query]})
         output = QueryPlanOutput.model_validate(raw_output)
         if not output.rewritten_queries:
@@ -88,8 +119,16 @@ class OpenAICompatibleLLMClient:
             model=result.model,
         )
 
-    def synthesize_answer(self, *, query: str, memories: list) -> LLMResult:
-        """调用真实 LLM 基于候选记忆整合答案。"""
+    async def synthesize_answer(self, *, query: str, memories: list) -> LLMResult:
+        """异步调用真实 LLM 基于候选记忆整合答案。
+
+        Args:
+            query: 原始查询文本。
+            memories: 候选记忆列表。
+
+        Returns:
+            LLM 整合后的答案结果。
+        """
 
         prompt_input = AnswerSynthesisInput(
             query=query,
@@ -108,7 +147,7 @@ class OpenAICompatibleLLMClient:
             },
             {"role": "user", "content": prompt_input.model_dump_json()},
         ]
-        result = self._chat(messages)
+        result = await self._chat(messages)
         safe_fallback = _safe_answer_fallback()
         raw_output = _parse_json_object(
             result.output.get("content", ""),
@@ -127,14 +166,22 @@ class OpenAICompatibleLLMClient:
             model=result.model,
         )
 
-    def run_prompt(self, *, prompt_key: str, payload: dict) -> LLMResult:
-        """调用真实 LLM 执行 prompt 调试。"""
+    async def run_prompt(self, *, prompt_key: str, payload: dict) -> LLMResult:
+        """异步调用真实 LLM 执行 prompt 调试。
+
+        Args:
+            prompt_key: 待调试的 prompt 标识。
+            payload: prompt 输入负载。
+
+        Returns:
+            prompt 调试的结构化输出。
+        """
 
         messages = [
             {"role": "system", "content": f"执行 MemoFlux prompt：{prompt_key}，输出 JSON。"},
             {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
         ]
-        result = self._chat(messages)
+        result = await self._chat(messages)
         output = _parse_json_object(result.output.get("content", ""), fallback={"content": result.output.get("content", "")})
         return LLMResult(
             output=output,
@@ -145,7 +192,28 @@ class OpenAICompatibleLLMClient:
             model=result.model,
         )
 
-    def _chat(self, messages: list[dict[str, str]]) -> LLMResult:
+    async def _chat(self, messages: list[dict[str, str]]) -> LLMResult:
+        """异步发送 Chat Completions 请求。
+
+        Args:
+            messages: Chat Completions 消息列表。
+
+        Returns:
+            原始模型文本和用量统计。
+        """
+
+        return await asyncio.to_thread(self._chat_sync, messages)
+
+    def _chat_sync(self, messages: list[dict[str, str]]) -> LLMResult:
+        """在线程中执行阻塞的 urllib 请求。
+
+        Args:
+            messages: Chat Completions 消息列表。
+
+        Returns:
+            原始模型文本和用量统计。
+        """
+
         payload_data: dict[str, Any] = {"model": self.model, "messages": messages, "temperature": 0.0}
         payload = json.dumps(payload_data, ensure_ascii=False).encode("utf-8")
         request = urllib.request.Request(

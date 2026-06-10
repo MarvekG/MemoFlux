@@ -15,8 +15,8 @@ class MemoryRepository:
         self._query_audits: dict[str, QueryAuditRecord] = {}
         self._delete_audits: dict[str, DeleteAuditRecord] = {}
 
-    def insert_memory(self, *, session: str, content: str, occurred_at: datetime, embedding=None) -> MemoryRecord:
-        """写入一条记忆。"""
+    async def insert_memory(self, *, session: str, content: str, occurred_at: datetime, embedding=None) -> MemoryRecord:
+        """异步写入一条记忆。"""
 
         memory = MemoryRecord(
             memory_id=uuid4().hex,
@@ -28,15 +28,15 @@ class MemoryRepository:
         self._memories[memory.memory_id] = memory
         return memory
 
-    def search_memories(self, *, session: str, terms: set[str], limit: int, query_embedding=None) -> list[MemoryRecord]:
-        """按 session 召回候选。"""
+    async def search_memories(self, *, session: str, terms: set[str], limit: int, query_embedding=None) -> list[MemoryRecord]:
+        """异步按 session 召回候选。"""
 
         memories = [memory for memory in self._memories.values() if memory.session == session]
         memories.sort(key=lambda memory: memory.occurred_at)
         return memories[:limit]
 
-    def delete_memories(self, *, session: str, memory_ids: list[str]) -> list[str]:
-        """硬删除同一 session 内的记忆。"""
+    async def delete_memories(self, *, session: str, memory_ids: list[str]) -> list[str]:
+        """异步硬删除同一 session 内的记忆。"""
 
         matched = [
             memory_id
@@ -47,8 +47,8 @@ class MemoryRepository:
             del self._memories[memory_id]
         return matched
 
-    def delete_memories_before_occurred_at(self, cutoff) -> dict[str, list[str]]:
-        """按发生时间硬删除过期记忆并按 session 返回删除 ID。
+    async def delete_memories_before_occurred_at(self, cutoff) -> dict[str, list[str]]:
+        """异步按发生时间硬删除过期记忆并按 session 返回删除 ID。
 
         Args:
             cutoff: 过期判断截止时间，早于该时间的记忆会被删除。
@@ -66,14 +66,14 @@ class MemoryRepository:
                 del self._memories[memory_id]
         return grouped
 
-    def list_memories(self, *, session: str | None, limit: int, offset: int = 0) -> tuple[list[MemoryRecord], int]:
-        """列出原始记忆，未指定 session 时返回所有 session。"""
+    async def list_memories(self, *, session: str | None, limit: int, offset: int = 0) -> tuple[list[MemoryRecord], int]:
+        """异步列出原始记忆，未指定 session 时返回所有 session。"""
 
         memories = [memory for memory in self._memories.values() if session is None or memory.session == session]
         memories.sort(key=lambda memory: memory.occurred_at)
         return memories[offset:offset + limit], len(memories)
 
-    def record_usage(
+    async def record_usage(
         self,
         *,
         operation: str,
@@ -82,12 +82,12 @@ class MemoryRepository:
         cached_tokens: int = 0,
         reasoning_tokens: int = 0,
     ) -> None:
-        """记录聚合 LLM 用量。"""
+        """异步记录聚合 LLM 用量。"""
 
         self._usage.append((operation, input_tokens, output_tokens, cached_tokens, reasoning_tokens))
 
-    def usage_stats(self) -> UsageStats:
-        """返回聚合用量统计。"""
+    async def usage_stats(self) -> UsageStats:
+        """异步返回聚合用量统计。"""
 
         by_operation: dict[str, dict[str, int]] = {}
         for operation, input_tokens, output_tokens, cached_tokens, reasoning_tokens in self._usage:
@@ -118,24 +118,24 @@ class MemoryRepository:
             by_operation=by_operation,
         )
 
-    def clear_usage_stats(self) -> int:
-        """清空聚合用量统计。"""
+    async def clear_usage_stats(self) -> int:
+        """异步清空聚合用量统计。"""
 
         deleted = len(self._usage)
         self._usage.clear()
         return deleted
 
-    def record_query_audit(self, audit: QueryAuditRecord) -> None:
-        """记录召回查询审计。"""
+    async def record_query_audit(self, audit: QueryAuditRecord) -> None:
+        """异步记录召回查询审计。"""
 
         self._query_audits[audit.query_id] = audit
 
-    def record_delete_audit(self, audit: DeleteAuditRecord) -> None:
-        """记录删除操作审计。"""
+    async def record_delete_audit(self, audit: DeleteAuditRecord) -> None:
+        """异步记录删除操作审计。"""
 
         self._delete_audits[audit.delete_id] = audit
 
-    def list_audits(
+    async def list_audits(
         self,
         *,
         session: str | None,
@@ -143,7 +143,7 @@ class MemoryRepository:
         offset: int = 0,
         query_id: str | None = None,
     ) -> tuple[list[QueryAuditRecord | DeleteAuditRecord], int]:
-        """列出查询和删除审计，未指定 session 时返回所有 session。"""
+        """异步列出查询和删除审计，未指定 session 时返回所有 session。"""
 
         if query_id:
             audit = self._query_audits.get(query_id)
@@ -156,8 +156,8 @@ class MemoryRepository:
         audits.sort(key=lambda audit: audit.created_at, reverse=True)
         return audits[offset:offset + limit], len(audits)
 
-    def scrub_deleted_memory_from_audits(self, *, session: str, memory_ids: list[str]) -> None:
-        """从审计记录中清理已硬删除记忆的原文片段。"""
+    async def scrub_deleted_memory_from_audits(self, *, session: str, memory_ids: list[str]) -> None:
+        """异步从审计记录中清理已硬删除记忆的原文片段。"""
 
         deleted = set(memory_ids)
         for query_id, audit in list(self._query_audits.items()):

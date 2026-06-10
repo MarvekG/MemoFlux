@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import UTC, datetime, timedelta
 from time import perf_counter
@@ -23,8 +24,17 @@ class MemoFluxService:
         self.llm_client = llm_client or LocalLLMClient()
         self.embedding_service = embedding_client or embedding_service
 
-    def ingest(self, *, session: str, content: str, occurred_at: datetime):
-        """写入一条记忆。"""
+    async def ingest(self, *, session: str, content: str, occurred_at: datetime):
+        """异步写入一条记忆。
+
+        Args:
+            session: 记忆所属会话。
+            content: 需要写入的记忆内容。
+            occurred_at: 记忆发生时间。
+
+        Returns:
+            已写入的记忆记录。
+        """
 
         if not session:
             raise ValueError("session is required")
@@ -32,15 +42,15 @@ class MemoFluxService:
             raise ValueError("content is required")
         if occurred_at is None:
             raise ValueError("occurred_at is required")
-        embedding = LLMResult(output={"embedding": self.embedding_service.embed_text(content)})
-        self.repository.record_usage(
+        embedding = LLMResult(output={"embedding": await self.embedding_service.embed_text(content)})
+        await self.repository.record_usage(
             operation="embedding:ingest",
             input_tokens=embedding.input_tokens,
             output_tokens=embedding.output_tokens,
             cached_tokens=embedding.cached_tokens,
             reasoning_tokens=embedding.reasoning_tokens,
         )
-        memory = self.repository.insert_memory(
+        memory = await self.repository.insert_memory(
             session=session,
             content=content,
             occurred_at=occurred_at,
@@ -57,8 +67,18 @@ class MemoFluxService:
         )
         return memory
 
-    def recall(self, *, session: str, query: str, top_k: int = 12, lang: str | None = None) -> RecallResult:
-        """召回同一 session 内的候选记忆并生成答案。"""
+    async def recall(self, *, session: str, query: str, top_k: int = 12, lang: str | None = None) -> RecallResult:
+        """异步召回同一 session 内的候选记忆并生成答案。
+
+        Args:
+            session: 记忆所属会话。
+            query: 用户查询内容。
+            top_k: 返回引用数量上限。
+            lang: 本地化语言标识。
+
+        Returns:
+            召回答案、引用和置信度信息。
+        """
 
         if not session:
             raise ValueError("session is required")
@@ -84,7 +104,7 @@ class MemoFluxService:
             },
         )
         stage_started = perf_counter()
-        plan = self.llm_client.plan_query(query=query)
+        plan = await self.llm_client.plan_query(query=query)
         planner_elapsed_ms = _elapsed_ms(stage_started)
         rewritten_queries = plan.output.get("rewritten_queries") or [query]
         retrieval_queries = _build_retrieval_queries(query, rewritten_queries)
@@ -126,7 +146,7 @@ class MemoFluxService:
             },
         )
         stage_started = perf_counter()
-        query_embeddings = self.embedding_service.embed_texts(retrieval_queries)
+        query_embeddings = await self.embedding_service.embed_texts(retrieval_queries)
         embedding_elapsed_ms = _elapsed_ms(stage_started)
         logger.info(
             "MemoFlux recall stage completed",
@@ -156,7 +176,7 @@ class MemoFluxService:
         vector_batch_elapsed_ms: list[float] = []
         for index, embedding in enumerate(query_embeddings):
             query_embedding = LLMResult(output={"embedding": embedding})
-            self.repository.record_usage(
+            await self.repository.record_usage(
                 operation="embedding:recall",
                 input_tokens=query_embedding.input_tokens,
                 output_tokens=query_embedding.output_tokens,
@@ -164,7 +184,7 @@ class MemoFluxService:
                 reasoning_tokens=query_embedding.reasoning_tokens,
             )
             batch_started = perf_counter()
-            vector_batch = self.repository.search_memories(
+            vector_batch = await self.repository.search_memories(
                 session=session,
                 terms=set(),
                 limit=candidate_limit,
@@ -209,7 +229,10 @@ class MemoFluxService:
             },
         )
         stage_started = perf_counter()
-        listed_memories, listed_total = self.repository.list_memories(session=session, limit=candidate_limit)
+        listed_memories, listed_total = await self.repository.list_memories(
+            session=session,
+            limit=candidate_limit,
+        )
         list_elapsed_ms = _elapsed_ms(stage_started)
         logger.info(
             "MemoFlux recall stage completed",
@@ -249,7 +272,7 @@ class MemoFluxService:
                 "candidate_limit": candidate_limit,
             },
         )
-        self.repository.record_usage(
+        await self.repository.record_usage(
             operation="query_planner",
             input_tokens=plan.input_tokens,
             output_tokens=plan.output_tokens,
@@ -269,7 +292,7 @@ class MemoFluxService:
                 },
             )
             stage_started = perf_counter()
-            self.repository.record_query_audit(
+            await self.repository.record_query_audit(
                 QueryAuditRecord(
                     query_id=query_id,
                     session=session,
@@ -343,7 +366,7 @@ class MemoFluxService:
             },
         )
         stage_started = perf_counter()
-        synthesis = self.llm_client.synthesize_answer(query=query, memories=memories[:top_k])
+        synthesis = await self.llm_client.synthesize_answer(query=query, memories=memories[:top_k])
         synthesis_elapsed_ms = _elapsed_ms(stage_started)
         logger.info(
             "MemoFlux recall stage completed",
@@ -360,7 +383,7 @@ class MemoFluxService:
                 "reasoning_tokens": synthesis.reasoning_tokens,
             },
         )
-        self.repository.record_usage(
+        await self.repository.record_usage(
             operation="answer_synthesizer",
             input_tokens=synthesis.input_tokens,
             output_tokens=synthesis.output_tokens,
@@ -431,7 +454,7 @@ class MemoFluxService:
             },
         )
         stage_started = perf_counter()
-        self.repository.record_query_audit(
+        await self.repository.record_query_audit(
             QueryAuditRecord(
                 query_id=query_id,
                 session=session,
@@ -498,8 +521,21 @@ class MemoFluxService:
         )
         return result
 
-    def delete(self, *, session: str, memory_ids: list[str] | None, query: str | None, dry_run: bool) -> DeleteResult:
-        """删除记忆；query 模式只允许 dry-run。"""
+    async def delete(self, *, session: str, memory_ids: list[str] | None, query: str | None, dry_run: bool) -> DeleteResult:
+        """异步删除记忆；query 模式只允许 dry-run。
+
+        Args:
+            session: 记忆所属会话。
+            memory_ids: 待删除的记忆 ID 列表。
+            query: query dry-run 删除条件。
+            dry_run: 是否仅预览删除结果。
+
+        Returns:
+            删除匹配、影响范围和状态。
+
+        Raises:
+            ValueError: 入参缺失或 query 删除未使用 dry-run。
+        """
 
         if not session:
             raise ValueError("session is required")
@@ -509,27 +545,27 @@ class MemoFluxService:
             raise ValueError("memory_ids or query is required")
         delete_id = uuid4().hex
         if query:
-            query_embedding = LLMResult(output={"embedding": self.embedding_service.embed_text(query)})
-            self.repository.record_usage(
+            query_embedding = LLMResult(output={"embedding": await self.embedding_service.embed_text(query)})
+            await self.repository.record_usage(
                 operation="embedding:delete_dry_run",
                 input_tokens=query_embedding.input_tokens,
                 output_tokens=query_embedding.output_tokens,
                 cached_tokens=query_embedding.cached_tokens,
                 reasoning_tokens=query_embedding.reasoning_tokens,
             )
-            candidates = self.repository.search_memories(
+            candidates = await self.repository.search_memories(
                 session=session,
                 terms=set(),
                 limit=12,
                 query_embedding=query_embedding.output.get("embedding"),
             )
             matched = [memory.memory_id for memory in candidates]
-            self.repository.record_usage(
+            await self.repository.record_usage(
                 operation="delete_dry_run",
                 input_tokens=_estimate_tokens(query),
                 output_tokens=0,
             )
-            self.repository.record_delete_audit(
+            await self.repository.record_delete_audit(
                 DeleteAuditRecord(
                     delete_id=delete_id,
                     session=session,
@@ -555,9 +591,9 @@ class MemoFluxService:
                 },
             )
             return DeleteResult(delete_id=delete_id, matched_memory_ids=matched, affected_memory_ids=[], status="ok")
-        matched = self.repository.delete_memories(session=session, memory_ids=memory_ids or [])
-        self.repository.scrub_deleted_memory_from_audits(session=session, memory_ids=matched)
-        self.repository.record_delete_audit(
+        matched = await self.repository.delete_memories(session=session, memory_ids=memory_ids or [])
+        await self.repository.scrub_deleted_memory_from_audits(session=session, memory_ids=matched)
+        await self.repository.record_delete_audit(
             DeleteAuditRecord(
                 delete_id=delete_id,
                 session=session,
@@ -585,15 +621,28 @@ class MemoFluxService:
         )
         return DeleteResult(delete_id=delete_id, matched_memory_ids=matched, affected_memory_ids=matched, status="ok")
 
-    def preview(self, *, session: str | None = None, limit: int = 50, offset: int = 0):
-        """预览原始记忆，未指定 session 时返回所有 session。"""
+    async def preview(self, *, session: str | None = None, limit: int = 50, offset: int = 0):
+        """异步预览原始记忆。
 
-        return self.repository.list_memories(session=session, limit=limit, offset=offset)
+        Args:
+            session: 可选的会话过滤条件。
+            limit: 返回数量上限。
+            offset: 分页偏移量。
 
-    def usage_stats(self):
-        """返回聚合用量统计。"""
+        Returns:
+            记忆列表和总数。
+        """
 
-        stats = self.repository.usage_stats()
+        return await self.repository.list_memories(session=session, limit=limit, offset=offset)
+
+    async def usage_stats(self):
+        """异步返回聚合用量统计。
+
+        Returns:
+            聚合后的 LLM/Embedding 用量统计。
+        """
+
+        stats = await self.repository.usage_stats()
         logger.info(
             "MemoFlux usage stats returned",
             extra={
@@ -607,15 +656,19 @@ class MemoFluxService:
         )
         return stats
 
-    def clear_usage_stats(self) -> int:
-        """清空聚合用量统计。"""
+    async def clear_usage_stats(self) -> int:
+        """异步清空聚合用量统计。
 
-        deleted = self.repository.clear_usage_stats()
+        Returns:
+            已删除的用量记录数量。
+        """
+
+        deleted = await self.repository.clear_usage_stats()
         logger.info("MemoFlux usage stats cleared", extra={"deleted_count": deleted})
         return deleted
 
-    def cleanup_expired_memories(self, *, retention_days: int | None = None) -> dict[str, Any]:
-        """按发生时间清理超过保留期的记忆。
+    async def cleanup_expired_memories(self, *, retention_days: int | None = None) -> dict[str, Any]:
+        """异步按发生时间清理超过保留期的记忆。
 
         Args:
             retention_days: 记忆保留天数；为空时使用默认保留期。
@@ -626,14 +679,14 @@ class MemoFluxService:
 
         normalized_retention_days = _coerce_retention_days(retention_days)
         cutoff = _now_utc() - timedelta(days=normalized_retention_days)
-        deleted_by_session = self.repository.delete_memories_before_occurred_at(cutoff)
+        deleted_by_session = await self.repository.delete_memories_before_occurred_at(cutoff)
         deleted_total = 0
         for session, memory_ids in deleted_by_session.items():
             if not memory_ids:
                 continue
             deleted_total += len(memory_ids)
-            self.repository.scrub_deleted_memory_from_audits(session=session, memory_ids=memory_ids)
-            self.repository.record_delete_audit(
+            await self.repository.scrub_deleted_memory_from_audits(session=session, memory_ids=memory_ids)
+            await self.repository.record_delete_audit(
                 DeleteAuditRecord(
                     delete_id=uuid4().hex,
                     session=session,

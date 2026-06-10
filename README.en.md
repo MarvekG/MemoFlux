@@ -67,7 +67,7 @@ Create `.env` from `.env.example` and adjust the values for your deployment.
 Core settings:
 
 ```bash
-MEMOFLUX_DATABASE_URL=postgresql+psycopg2://tradeuser:tradepassword@memo-postgres:5432/memory
+MEMOFLUX_DATABASE_URL=postgresql+asyncpg://tradeuser:tradepassword@memo-postgres:5432/memory
 MEMOFLUX_DATABASE_SCHEMA=memoflux
 MEMOFLUX_SERVICE_PORT=8020
 MEMOFLUX_APP_RELOAD=true
@@ -122,7 +122,7 @@ The standalone compose file exposes:
 If you use the provided standalone compose file without editing it, make sure `.env` matches the standalone database service name, database, and credentials:
 
 ```bash
-MEMOFLUX_DATABASE_URL=postgresql+psycopg2://memouser:memopassword@memo-postgres:5432/memo
+MEMOFLUX_DATABASE_URL=postgresql+asyncpg://memouser:memopassword@memo-postgres:5432/memo
 MEMOFLUX_SERVICE_PORT=8010
 ```
 
