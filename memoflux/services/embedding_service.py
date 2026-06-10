@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import logging
 import os
+from threading import Lock
+from time import perf_counter
 from typing import Any
 
 from memoflux.config import load_settings
@@ -25,6 +27,7 @@ class EmbeddingService:
         self._local_files_only = settings.embedding_local_files_only
         self._hf_endpoint = settings.hf_endpoint
         self._local_model: Any | None = None
+        self._local_model_lock = Lock()
 
     @property
     def provider(self) -> str:
@@ -37,6 +40,12 @@ class EmbeddingService:
         """返回当前配置的向量维度。"""
 
         return self._dimension
+
+    @property
+    def model(self) -> str:
+        """返回当前配置的向量模型名称。"""
+
+        return self._model
 
     def embed_text(self, text: str) -> list[float]:
         """生成单条文本的向量。
@@ -88,17 +97,42 @@ class EmbeddingService:
         return coerced
 
     def _load_local_model(self) -> Any:
+        """延迟加载并复用本地向量模型。
+
+        Returns:
+            已加载的 SentenceTransformer 模型实例。
+        """
+
         if self._local_model is not None:
             return self._local_model
-        if self._hf_endpoint:
-            os.environ.setdefault("HF_ENDPOINT", self._hf_endpoint)
-        from sentence_transformers import SentenceTransformer
+        with self._local_model_lock:
+            if self._local_model is not None:
+                return self._local_model
+            started = perf_counter()
+            logger.info(
+                "Loading local embedding model",
+                extra={
+                    "embedding_model": self._model,
+                    "local_files_only": self._local_files_only,
+                    "cache_dir_present": bool(self._cache_dir),
+                },
+            )
+            if self._hf_endpoint:
+                os.environ.setdefault("HF_ENDPOINT", self._hf_endpoint)
+            from sentence_transformers import SentenceTransformer
 
-        kwargs: dict[str, Any] = {"local_files_only": self._local_files_only}
-        if self._cache_dir:
-            kwargs["cache_folder"] = self._cache_dir
-        self._local_model = SentenceTransformer(self._model, **kwargs)
-        return self._local_model
+            kwargs: dict[str, Any] = {"local_files_only": self._local_files_only}
+            if self._cache_dir:
+                kwargs["cache_folder"] = self._cache_dir
+            self._local_model = SentenceTransformer(self._model, **kwargs)
+            logger.info(
+                "Loaded local embedding model",
+                extra={
+                    "embedding_model": self._model,
+                    "elapsed_ms": round((perf_counter() - started) * 1000, 2),
+                },
+            )
+            return self._local_model
 
     def prewarm_local_model(self) -> None:
         """在后台提前加载本地向量模型。
