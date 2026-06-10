@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 import logging
 from contextlib import asynccontextmanager
 from datetime import datetime
@@ -67,19 +66,16 @@ def create_app(*, repository=None, llm_client=None, embedding_client=None, datab
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
-        prewarm_task = None
         cleanup_task = None
         init_schema = getattr(service.repository, "init_schema", None)
         if init_schema is not None:
             await init_schema()
-        if settings.embedding_prewarm_on_startup:
-            prewarm_task = asyncio.create_task(asyncio.to_thread(service.embedding_service.prewarm_local_model))
         if settings.memory_cleanup_enabled:
             cleanup_task = start_memory_retention_cleanup(service=service, settings=settings)
         try:
             yield
         finally:
-            tasks = [task for task in (cleanup_task, prewarm_task) if task is not None]
+            tasks = [task for task in (cleanup_task,) if task is not None]
             for task in tasks:
                 task.cancel()
             if tasks:

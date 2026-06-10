@@ -312,7 +312,6 @@ class FakeEmbeddingService:
     def __init__(self) -> None:
         self.calls = []
         self.batch_calls = []
-        self.prewarm_calls = 0
 
     async def embed_text(self, text: str) -> list[float]:
         self.calls.append(text)
@@ -322,12 +321,6 @@ class FakeEmbeddingService:
         self.batch_calls.append(list(texts))
         self.calls.extend(texts)
         return [[0.1, 0.2, 0.3] for _ in texts]
-
-    def prewarm_local_model(self) -> None:
-        if not load_settings().embedding_prewarm_on_startup:
-            return
-        self.prewarm_calls += 1
-
 
 class VectorAwareMemoryRepository(MemoryRepository):
     def __init__(self) -> None:
@@ -1219,22 +1212,7 @@ def test_retention_cleanup_settings_defaults(monkeypatch):
     assert settings.memory_cleanup_minute == 15
 
 
-def test_app_lifespan_schedules_embedding_prewarm(monkeypatch):
-    monkeypatch.setenv("MEMOFLUX_EMBEDDING_PREWARM_ON_STARTUP", "true")
-    fake_embedding_service = FakeEmbeddingService()
-    app = create_app(repository=MemoryRepository(), embedding_client=fake_embedding_service)
-
-    from fastapi.testclient import TestClient
-
-    with TestClient(app) as client:
-        response = client.get("/v1/health")
-
-    assert response.status_code == 200
-    assert fake_embedding_service.prewarm_calls == 1
-
-
 def test_create_app_does_not_start_retention_cleanup_when_disabled(monkeypatch):
-    monkeypatch.setenv("MEMOFLUX_EMBEDDING_PREWARM_ON_STARTUP", "false")
     monkeypatch.setenv("MEMOFLUX_MEMORY_CLEANUP_ENABLED", "false")
     created_tasks = []
 
@@ -1264,32 +1242,90 @@ def test_create_app_does_not_start_retention_cleanup_when_disabled(monkeypatch):
     assert created_tasks == []
 
 
-def test_app_lifespan_skips_embedding_prewarm_when_disabled(monkeypatch):
-    monkeypatch.setenv("MEMOFLUX_EMBEDDING_PREWARM_ON_STARTUP", "false")
-    fake_embedding_service = FakeEmbeddingService()
-    app = create_app(repository=MemoryRepository(), embedding_client=fake_embedding_service)
-
-    from fastapi.testclient import TestClient
-
-    with TestClient(app) as client:
-        response = client.get("/v1/health")
-
-    assert response.status_code == 200
-    assert fake_embedding_service.prewarm_calls == 0
-
-
-def test_embedding_prewarm_skips_non_local_provider(monkeypatch):
+def test_local_embedding_sets_cache_environment(monkeypatch, tmp_path):
     from memoflux.services.embedding_service import EmbeddingService
 
-    monkeypatch.setenv("MEMOFLUX_EMBEDDING_PREWARM_ON_STARTUP", "true")
-    monkeypatch.setenv("MEMOFLUX_EMBEDDING_PROVIDER", "openai_compatible")
+    cache_dir = tmp_path / "models"
+    monkeypatch.setenv("MEMOFLUX_EMBEDDING_PROVIDER", "local")
+    monkeypatch.setenv("MEMOFLUX_EMBEDDING_CACHE_DIR", str(cache_dir))
     service = EmbeddingService()
-    load_calls = []
-    monkeypatch.setattr(service, "_load_local_model", lambda: load_calls.append("loaded"))
 
-    service.prewarm_local_model()
+    class FakeSentenceTransformer:
+        def __init__(self, model, **kwargs):
+            self.model = model
+            self.kwargs = kwargs
 
-    assert load_calls == []
+    import types
+    import sys
+
+    monkeypatch.setitem(
+        sys.modules,
+        "sentence_transformers",
+        types.SimpleNamespace(SentenceTransformer=FakeSentenceTransformer),
+    )
+
+    service._load_local_model()
+
+    assert cache_dir.exists()
+    assert service._local_model.kwargs["cache_folder"] == str(cache_dir)
+
+
+def test_local_embedding_uses_local_weights_by_default(monkeypatch, tmp_path):
+    from memoflux.services.embedding_service import EmbeddingService
+
+    monkeypatch.setenv("MEMOFLUX_EMBEDDING_PROVIDER", "local")
+    monkeypatch.setenv("MEMOFLUX_EMBEDDING_CACHE_DIR", str(tmp_path / "models"))
+    service = EmbeddingService()
+
+    class FakeSentenceTransformer:
+        def __init__(self, model, **kwargs):
+            self.model = model
+            self.kwargs = kwargs
+
+    import types
+    import sys
+
+    monkeypatch.setitem(
+        sys.modules,
+        "sentence_transformers",
+        types.SimpleNamespace(SentenceTransformer=FakeSentenceTransformer),
+    )
+
+    service._load_local_model()
+
+    assert service._local_model.kwargs["local_files_only"] is True
+
+
+def test_local_embedding_loads_cached_snapshot_path(monkeypatch, tmp_path):
+    from memoflux.services.embedding_service import EmbeddingService
+
+    cache_dir = tmp_path / "models"
+    snapshot_dir = cache_dir / "models--BAAI--bge-base-zh-v1.5" / "snapshots" / "revision"
+    snapshot_dir.mkdir(parents=True)
+    (snapshot_dir / "config.json").write_text("{}", encoding="utf-8")
+    (snapshot_dir / "modules.json").write_text("[]", encoding="utf-8")
+    monkeypatch.setenv("MEMOFLUX_EMBEDDING_PROVIDER", "local")
+    monkeypatch.setenv("MEMOFLUX_EMBEDDING_MODEL", "BAAI/bge-base-zh-v1.5")
+    monkeypatch.setenv("MEMOFLUX_EMBEDDING_CACHE_DIR", str(cache_dir))
+    service = EmbeddingService()
+
+    class FakeSentenceTransformer:
+        def __init__(self, model, **kwargs):
+            self.model = model
+            self.kwargs = kwargs
+
+    import types
+    import sys
+
+    monkeypatch.setitem(
+        sys.modules,
+        "sentence_transformers",
+        types.SimpleNamespace(SentenceTransformer=FakeSentenceTransformer),
+    )
+
+    service._load_local_model()
+
+    assert service._local_model.model == str(snapshot_dir)
 
 
 def test_default_embedding_provider_is_local_with_configured_dimension(monkeypatch):

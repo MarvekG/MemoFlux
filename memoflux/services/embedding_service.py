@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import os
+from pathlib import Path
 from threading import Lock
 from time import perf_counter
 from typing import Any
@@ -25,8 +25,7 @@ class EmbeddingService:
         self._base_url = settings.embedding_base_url
         self._timeout_seconds = float(settings.embedding_timeout_seconds)
         self._cache_dir = settings.embedding_cache_dir
-        self._local_files_only = settings.embedding_local_files_only
-        self._hf_endpoint = settings.hf_endpoint
+        self._use_local_weights = settings.embedding_use_local_weights
         self._local_model: Any | None = None
         self._local_model_lock = Lock()
 
@@ -114,18 +113,20 @@ class EmbeddingService:
                 "Loading local embedding model",
                 extra={
                     "embedding_model": self._model,
-                    "local_files_only": self._local_files_only,
+                    "use_local_weights": self._use_local_weights,
                     "cache_dir_present": bool(self._cache_dir),
                 },
             )
-            if self._hf_endpoint:
-                os.environ.setdefault("HF_ENDPOINT", self._hf_endpoint)
+            if self._cache_dir:
+                cache_path = Path(self._cache_dir)
+                cache_path.mkdir(parents=True, exist_ok=True)
             from sentence_transformers import SentenceTransformer
 
-            kwargs: dict[str, Any] = {"local_files_only": self._local_files_only}
+            model_path = self._resolve_local_model_path(cache_path) if self._use_local_weights and self._cache_dir else self._model
+            kwargs: dict[str, Any] = {"local_files_only": self._use_local_weights}
             if self._cache_dir:
                 kwargs["cache_folder"] = self._cache_dir
-            self._local_model = SentenceTransformer(self._model, **kwargs)
+            self._local_model = SentenceTransformer(str(model_path), **kwargs)
             logger.info(
                 "Loaded local embedding model",
                 extra={
@@ -135,26 +136,25 @@ class EmbeddingService:
             )
             return self._local_model
 
-    def prewarm_local_model(self) -> None:
-        """在后台提前加载本地向量模型。
+    def _resolve_local_model_path(self, cache_path: Path) -> str | Path:
+        """优先解析构建期缓存的本地模型目录。
 
-        配置关闭预热或当前不是本地向量提供方时直接返回，用于降低首个业务请求的
-        权重加载延迟。预热失败只记录日志，避免后台任务异常影响 FastAPI 应用启动。
+        Args:
+            cache_path: SentenceTransformer 缓存根目录。
 
-        Raises:
-            不主动抛出异常；本地模型加载异常会被捕获并记录日志。
+        Returns:
+            可直接传给 SentenceTransformer 的本地 snapshot 目录；如果缓存目录还未初始化，则返回模型名。
         """
 
-        settings = load_settings()
-        if not settings.embedding_prewarm_on_startup or self._provider != "local":
-            return
-        try:
-            self._load_local_model()
-        except Exception:
-            logger.exception(
-                "Failed to prewarm local embedding model",
-                extra={"embedding_model": self._model},
-            )
+        snapshot_root = cache_path / f"models--{self._model.replace('/', '--')}" / "snapshots"
+        if not snapshot_root.exists():
+            return self._model
+        snapshots = sorted(
+            path
+            for path in snapshot_root.iterdir()
+            if path.is_dir() and (path / "config.json").exists() and (path / "modules.json").exists()
+        )
+        return snapshots[-1] if snapshots else self._model
 
     async def _embed_openai_compatible_texts(self, texts: list[str]) -> list[list[float]]:
         """调用 OpenAI 兼容接口异步生成向量。

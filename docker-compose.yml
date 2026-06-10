@@ -5,14 +5,14 @@ services:
     ports:
       - "5433:5432"
     environment:
-      POSTGRES_USER: memouser
-      POSTGRES_PASSWORD: memopassword
-      POSTGRES_DB: memo
+      POSTGRES_USER: tradeuser
+      POSTGRES_PASSWORD: tradepassword
+      POSTGRES_DB: memory
       TZ: Asia/Shanghai
     volumes:
       - memo_pgvector17_data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U memouser -d memo"]
+      test: ["CMD-SHELL", "pg_isready -U tradeuser -d memory"]
       interval: 1m
       start_interval: 10s
       timeout: 5s
