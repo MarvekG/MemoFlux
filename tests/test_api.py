@@ -312,6 +312,10 @@ class FakeEmbeddingService:
     def __init__(self) -> None:
         self.calls = []
         self.batch_calls = []
+        self.warm_up_calls = 0
+
+    async def warm_up(self) -> None:
+        self.warm_up_calls += 1
 
     async def embed_text(self, text: str) -> list[float]:
         self.calls.append(text)
@@ -321,6 +325,44 @@ class FakeEmbeddingService:
         self.batch_calls.append(list(texts))
         self.calls.extend(texts)
         return [[0.1, 0.2, 0.3] for _ in texts]
+
+
+class BlockingWarmUpEmbeddingService(FakeEmbeddingService):
+    def __init__(self) -> None:
+        super().__init__()
+        self.started = asyncio.Event()
+        self.can_finish = asyncio.Event()
+
+    async def warm_up(self) -> None:
+        self.warm_up_calls += 1
+        self.started.set()
+        await self.can_finish.wait()
+
+
+def test_startup_warms_up_embedding_service():
+    fake_embedding_service = FakeEmbeddingService()
+    app = create_app(repository=MemoryRepository(), embedding_client=fake_embedding_service)
+    from fastapi.testclient import TestClient
+
+    with TestClient(app) as client:
+        response = client.get("/v1/health")
+
+    assert response.status_code == 200
+    assert fake_embedding_service.warm_up_calls == 1
+
+
+def test_startup_runs_embedding_warm_up_in_background():
+    fake_embedding_service = BlockingWarmUpEmbeddingService()
+    app = create_app(repository=MemoryRepository(), embedding_client=fake_embedding_service)
+    from fastapi.testclient import TestClient
+
+    with TestClient(app) as client:
+        response = client.get("/v1/health")
+        fake_embedding_service.can_finish.set()
+
+    assert response.status_code == 200
+    assert fake_embedding_service.warm_up_calls == 1
+
 
 class VectorAwareMemoryRepository(MemoryRepository):
     def __init__(self) -> None:

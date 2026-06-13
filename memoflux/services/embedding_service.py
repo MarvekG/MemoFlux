@@ -82,6 +82,26 @@ class EmbeddingService:
             return await self._embed_openai_compatible_texts(normalized)
         raise ValueError(f"Unsupported MEMOFLUX_EMBEDDING_PROVIDER: {self._provider}")
 
+    async def warm_up(self) -> None:
+        """在服务启动阶段预热向量服务，降低首个真实请求的延迟。
+
+        本地提供方会提前加载模型；远程提供方不主动发起探测请求，避免启动过程依赖外部网关可用性。
+
+        Raises:
+            ValueError: 配置了不支持的向量提供方。
+        """
+
+        if self._provider == "local":
+            await asyncio.to_thread(self._load_local_model)
+            return
+        if self._provider == "openai_compatible":
+            logger.info(
+                "Skipping remote embedding warm-up",
+                extra={"embedding_provider": self._provider, "embedding_model": self._model},
+            )
+            return
+        raise ValueError(f"Unsupported MEMOFLUX_EMBEDDING_PROVIDER: {self._provider}")
+
     def _embed_local_texts(self, texts: list[str]) -> list[list[float]]:
         model = self._load_local_model()
         vectors = model.encode(
