@@ -68,17 +68,22 @@ def create_app(*, repository=None, llm_client=None, embedding_client=None, datab
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         cleanup_task = None
+        warm_up_task = None
         init_schema = getattr(service.repository, "init_schema", None)
         if init_schema is not None:
             await init_schema()
+        warm_up_embedding = getattr(service.embedding_service, "warm_up", None)
+        if warm_up_embedding is not None:
+            warm_up_task = asyncio.get_running_loop().create_task(warm_up_embedding())
         if settings.memory_cleanup_enabled:
             cleanup_task = start_memory_retention_cleanup(service=service, settings=settings)
         try:
             yield
         finally:
-            tasks = [task for task in (cleanup_task,) if task is not None]
+            tasks = [task for task in (cleanup_task, warm_up_task) if task is not None]
             for task in tasks:
-                task.cancel()
+                if not task.done():
+                    task.cancel()
             if tasks:
                 await asyncio.gather(*tasks, return_exceptions=True)
 
