@@ -89,11 +89,18 @@ class MemoryRepository:
     async def usage_stats(self) -> UsageStats:
         """异步返回聚合用量统计。"""
 
-        by_operation: dict[str, dict[str, int]] = {}
+        by_operation: dict[str, dict[str, int | float]] = {}
         for operation, input_tokens, output_tokens, cached_tokens, reasoning_tokens in self._usage:
             item = by_operation.setdefault(
                 operation,
-                {"calls": 0, "input_tokens": 0, "output_tokens": 0, "cached_tokens": 0, "cache_miss_tokens": 0, "reasoning_tokens": 0},
+                {
+                    "calls": 0,
+                    "input_tokens": 0,
+                    "output_tokens": 0,
+                    "cached_tokens": 0,
+                    "cache_miss_tokens": 0,
+                    "reasoning_tokens": 0,
+                },
             )
             item["calls"] += 1
             item["input_tokens"] += input_tokens
@@ -101,6 +108,10 @@ class MemoryRepository:
             item["cached_tokens"] += cached_tokens
             item["cache_miss_tokens"] += max(input_tokens - cached_tokens, 0)
             item["reasoning_tokens"] += reasoning_tokens
+        for item in by_operation.values():
+            input_tokens = int(item["input_tokens"])
+            cached_tokens = int(item["cached_tokens"])
+            item["cache_hit_rate"] = (cached_tokens / input_tokens) if input_tokens else 0.0
         total_input = sum(item[1] for item in self._usage)
         total_output = sum(item[2] for item in self._usage)
         total_cached = sum(item[3] for item in self._usage)

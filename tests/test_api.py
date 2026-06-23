@@ -659,7 +659,9 @@ def test_usage_stats_are_aggregate_only():
 def test_usage_stats_include_cached_tokens_and_hit_rate():
     repository = MemoryRepository()
     run_async(repository.record_usage(operation="query_planner", input_tokens=100, output_tokens=20, cached_tokens=30))
-    run_async(repository.record_usage(operation="answer_synthesizer", input_tokens=50, output_tokens=10, cached_tokens=10))
+    run_async(
+        repository.record_usage(operation="answer_synthesizer", input_tokens=50, output_tokens=10, cached_tokens=10)
+    )
 
     stats = run_async(repository.usage_stats())
 
@@ -669,6 +671,8 @@ def test_usage_stats_include_cached_tokens_and_hit_rate():
     assert stats.cache_hit_rate == 40 / 150
     assert stats.by_operation["query_planner"]["cached_tokens"] == 30
     assert stats.by_operation["query_planner"]["cache_miss_tokens"] == 70
+    assert stats.by_operation["query_planner"]["cache_hit_rate"] == 30 / 100
+    assert stats.by_operation["answer_synthesizer"]["cache_hit_rate"] == 10 / 50
 
 
 def test_retention_repository_deletes_by_occurred_at():
