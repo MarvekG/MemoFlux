@@ -16,4 +16,4 @@ class UsageStats:
     cache_miss_tokens: int
     reasoning_tokens: int
     cache_hit_rate: float
-    by_operation: dict[str, dict[str, int]]
+    by_operation: dict[str, dict[str, int | float]]

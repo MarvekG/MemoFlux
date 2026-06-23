@@ -152,17 +152,19 @@ class PostgresMemoryRepository:
         )
         async with AsyncSession(self.engine) as db_session:
             rows = (await db_session.execute(statement)).all()
-        by_operation = {
-            operation: {
+        by_operation: dict[str, dict[str, int | float]] = {}
+        for operation, calls, input_tokens, output_tokens, cached_tokens, reasoning_tokens in rows:
+            operation_input_tokens = int(input_tokens or 0)
+            operation_cached_tokens = int(cached_tokens or 0)
+            by_operation[operation] = {
                 "calls": int(calls or 0),
-                "input_tokens": int(input_tokens or 0),
+                "input_tokens": operation_input_tokens,
                 "output_tokens": int(output_tokens or 0),
-                "cached_tokens": int(cached_tokens or 0),
-                "cache_miss_tokens": max(int(input_tokens or 0) - int(cached_tokens or 0), 0),
+                "cached_tokens": operation_cached_tokens,
+                "cache_miss_tokens": max(operation_input_tokens - operation_cached_tokens, 0),
                 "reasoning_tokens": int(reasoning_tokens or 0),
+                "cache_hit_rate": (operation_cached_tokens / operation_input_tokens) if operation_input_tokens else 0.0,
             }
-            for operation, calls, input_tokens, output_tokens, cached_tokens, reasoning_tokens in rows
-        }
         total_input = sum(item["input_tokens"] for item in by_operation.values())
         total_output = sum(item["output_tokens"] for item in by_operation.values())
         total_cached = sum(item["cached_tokens"] for item in by_operation.values())
