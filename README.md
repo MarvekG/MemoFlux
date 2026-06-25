@@ -81,7 +81,7 @@ LLM 配置：
 ```bash
 MEMOFLUX_LLM_BASE_URL=http://litellm:4000/v1
 MEMOFLUX_LLM_API_KEY=sk-litellm-gateway-key
-MEMOFLUX_LLM_MODEL=memory
+MEMOFLUX_LLM_MODEL=openai-compatible
 ```
 
 本地向量模型配置：
